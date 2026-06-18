@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Car Tag</title>
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <section class="screen screen-menu" id="start-screen">
+      <div class="menu-shell">
+        <div class="menu-stage" aria-hidden="true">
+          <div class="arena-preview">
+            <span class="arena-ring ring-a"></span>
+            <span class="arena-ring ring-b"></span>
+            <span class="arena-ring ring-c"></span>
+            <span class="arena-lane lane-a"></span>
+            <span class="arena-lane lane-b"></span>
+            <span class="arena-car car-a"></span>
+            <span class="arena-car car-b"></span>
+            <span class="arena-car car-c"></span>
+          </div>
+        </div>
+        <div class="menu-copy">
+          <p class="eyebrow">Arcade Arena</p>
+          <h1>Car Tag</h1>
+        </div>
+        <div class="menu-panel">
+          <div class="brand-block">
+            <p class="eyebrow">Match Setup</p>
+          </div>
+          <div class="menu-grid">
+            <label>
+              <span>Round Time</span>
+              <select id="round-time">
+                <option value="60">1:00</option>
+                <option value="120" selected>2:00</option>
+                <option value="180">3:00</option>
+                <option value="300">5:00</option>
+              </select>
+            </label>
+            <label>
+              <span>Cars</span>
+              <select id="player-count">
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4" selected>4</option>
+                <option value="5">5</option>
+                <option value="6">6</option>
+              </select>
+            </label>
+            <label>
+              <span>Arena</span>
+              <select id="arena-select">
+                <option value="bowl" selected>Heat Bowl</option>
+              </select>
+            </label>
+          </div>
+          <div class="color-section">
+            <span>Car Color</span>
+            <div class="color-picker" id="color-picker" aria-label="Car color"></div>
+          </div>
+          <button class="primary-action" id="start-round" type="button">Start Round</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="screen screen-end hidden" id="end-screen">
+      <div class="menu-panel results-panel">
+        <p class="eyebrow">Round Complete</p>
+        <h1>Results</h1>
+        <ol class="results-list" id="results-list"></ol>
+        <button class="primary-action" id="play-again" type="button">Play Again</button>
+      </div>
+    </section>
+
+    <div class="hud">
+      <div class="dial">
+        <span id="speed">000</span>
+        <small>mph</small>
+      </div>
+      <div class="tag-hud">
+        <div class="it-banner" id="it-banner">TAG</div>
+        <div class="leaderboard" id="leaderboard"></div>
+      </div>
+      <div class="timer" id="round-timer">2:00</div>
+      <button class="boost-meter" id="boost" type="button" style="--boost-ready: 100%" aria-label="Boost">
+        <div class="boost-ring">
+          <span id="boost-value"></span>
+        </div>
+        <small>boost</small>
+      </button>
+      <button class="jump-button" id="jump-button" type="button" aria-label="Jump">
+        <div class="jump-ring">
+          <span>↑</span>
+        </div>
+        <small>jump</small>
+      </button>
+    </div>
+    <div class="touch-controls" aria-hidden="true">
+      <div class="joystick" id="joystick">
+        <div class="joystick-knob" id="joystick-knob"></div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

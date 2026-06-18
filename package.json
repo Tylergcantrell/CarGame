@@ -1,0 +1,19 @@
+{
+  "name": "car-game-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "cannon-es": "^0.20.0",
+    "three": "^0.177.0",
+    "vite": "^7.0.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.60.0"
+  }
+}
