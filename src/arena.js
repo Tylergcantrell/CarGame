@@ -1,0 +1,140 @@
+export const worldSpec = {
+  floorRadius: 68,
+  curveRadius: 30,
+};
+worldSpec.outerRadius = worldSpec.floorRadius + worldSpec.curveRadius;
+worldSpec.ceilingY = worldSpec.curveRadius * 2;
+
+function makeOuterSpawnPoints(radius, angleOffset = 0) {
+  return Array.from({ length: 8 }, (_, index) => {
+    const angle = angleOffset + (index / 8) * Math.PI * 2;
+    return {
+      x: Math.cos(angle) * radius,
+      z: Math.sin(angle) * radius,
+      yaw: Math.atan2(-Math.cos(angle), -Math.sin(angle)),
+    };
+  });
+}
+
+export const arenaDefinitions = {
+  orange: {
+    label: "Orange",
+    theme: {
+      surface: 0x1c120c,
+      surfaceEmissive: 0x090403,
+      floorLine: 0xb78645,
+      floorGlow: 0xff7a2f,
+      floorAccent: 0xffd176,
+      wallFill: 0x5c2612,
+      wallEdge: 0xff7a2f,
+      wallGlow: 0xff7a2f,
+      wallAccent: 0xffd176,
+      rampTop: 0x24201b,
+      rampSide: 0x120c09,
+      rampEdge: 0xff7a2f,
+      rampEdgeDepthTest: true,
+      rampEdgeOpacity: 0.78,
+      fillLight: 0xff7a2f,
+      wallLight: 0xff7a2f,
+    },
+    mounds: [
+      { x: 0, z: 0, yaw: Math.PI / 4, width: 23, length: 23, height: 2.6, topScale: 0.42 },
+      { x: 0, z: -31, yaw: 0, width: 18, length: 26, height: 4.2, topScale: 0.24 },
+      { x: 0, z: 31, yaw: Math.PI, width: 18, length: 26, height: 4.2, topScale: 0.24 },
+      { x: 31, z: 0, yaw: -Math.PI / 2, width: 18, length: 26, height: 4.2, topScale: 0.24 },
+      { x: -31, z: 0, yaw: Math.PI / 2, width: 18, length: 26, height: 4.2, topScale: 0.24 },
+      { x: 38, z: 38, yaw: -Math.PI * 0.75, width: 16, length: 24, height: 3.4, topScale: 0.26 },
+      { x: -38, z: 38, yaw: Math.PI * 0.75, width: 16, length: 24, height: 3.4, topScale: 0.26 },
+      { x: 38, z: -38, yaw: -Math.PI * 0.25, width: 16, length: 24, height: 3.4, topScale: 0.26 },
+      { x: -38, z: -38, yaw: Math.PI * 0.25, width: 16, length: 24, height: 3.4, topScale: 0.26 },
+    ],
+    spawnPoints: makeOuterSpawnPoints(58, Math.PI / 8),
+  },
+  blue: {
+    label: "Blue",
+    theme: {
+      surface: 0x0b1422,
+      surfaceEmissive: 0x020711,
+      floorLine: 0x557fb6,
+      floorGlow: 0x2e8cff,
+      floorAccent: 0x9fd8ff,
+      wallFill: 0x102e5e,
+      wallEdge: 0x33a4ff,
+      wallGlow: 0x4cc7ff,
+      wallAccent: 0xb7ecff,
+      rampTop: 0x162132,
+      rampSide: 0x08101d,
+      rampEdge: 0x2fa4ff,
+      rampEdgeDepthTest: true,
+      rampEdgeOpacity: 0.78,
+      fillLight: 0x328cff,
+      wallLight: 0x52c6ff,
+    },
+    mounds: [
+      { type: "ridge", x: 0, z: 0, yaw: Math.PI * 0.25, width: 9, length: 38, height: 1.35, topScale: 0.58 },
+      { type: "ridge", x: 0, z: -33, yaw: Math.PI * 0.08, width: 18, length: 29, height: 3.6, topScale: 0.48 },
+      { type: "ridge", x: 33, z: 0, yaw: -Math.PI * 0.42, width: 18, length: 29, height: 3.6, topScale: 0.48 },
+      { type: "ridge", x: 0, z: 33, yaw: Math.PI * 1.08, width: 18, length: 29, height: 3.6, topScale: 0.48 },
+      { type: "ridge", x: -33, z: 0, yaw: Math.PI * 0.58, width: 18, length: 29, height: 3.6, topScale: 0.48 },
+      { type: "peak", x: 28, z: 28, yaw: -Math.PI * 0.72, width: 12, length: 18, height: 2.1 },
+      { type: "peak", x: -28, z: -28, yaw: Math.PI * 0.28, width: 12, length: 18, height: 2.1 },
+    ],
+    spawnPoints: makeOuterSpawnPoints(59, Math.PI / 8),
+  },
+  purple: {
+    label: "Purple",
+    theme: {
+      surface: 0x170f24,
+      surfaceEmissive: 0x06030d,
+      floorLine: 0x8f61c7,
+      floorGlow: 0xb65cff,
+      floorAccent: 0xf2c7ff,
+      wallFill: 0x351560,
+      wallEdge: 0xb85cff,
+      wallGlow: 0xd56dff,
+      wallAccent: 0xffc6fb,
+      rampTop: 0x22182e,
+      rampSide: 0x100817,
+      rampEdge: 0xbf62ff,
+      rampEdgeDepthTest: true,
+      rampEdgeOpacity: 0.78,
+      fillLight: 0xa95cff,
+      wallLight: 0xdc7cff,
+    },
+    mounds: [
+      { type: "ridge", x: -34, z: 0, yaw: 0, width: 22, length: 92, height: 6.2, topScale: 0.56 },
+      { type: "ridge", x: 0, z: 0, yaw: 0, width: 24, length: 96, height: 6.7, topScale: 0.58 },
+      { type: "ridge", x: 34, z: 0, yaw: 0, width: 22, length: 92, height: 6.2, topScale: 0.56 },
+    ],
+    spawnPoints: makeOuterSpawnPoints(59, Math.PI / 8),
+  },
+  green: {
+    label: "Green",
+    theme: {
+      surface: 0x101b12,
+      surfaceEmissive: 0x031006,
+      floorLine: 0x6fa45f,
+      floorGlow: 0x6ee85d,
+      floorAccent: 0xd8ff9c,
+      wallFill: 0x184a25,
+      wallEdge: 0x65e85f,
+      wallGlow: 0x94ff6b,
+      wallAccent: 0xd8ff9c,
+      rampTop: 0x18251a,
+      rampSide: 0x09120b,
+      rampEdge: 0x71ed5d,
+      rampEdgeDepthTest: true,
+      rampEdgeOpacity: 0.78,
+      fillLight: 0x66dd55,
+      wallLight: 0xa7ff75,
+    },
+    mounds: [
+      { type: "mound", x: 0, z: 0, yaw: 0, width: 88, length: 88, height: 7.8, topScale: 0.62 },
+      { type: "mound", x: 60, z: 0, yaw: -Math.PI / 2, width: 12, length: 16, height: 2.1, topScale: 0.32 },
+      { type: "mound", x: -60, z: 0, yaw: Math.PI / 2, width: 12, length: 16, height: 2.1, topScale: 0.32 },
+      { type: "mound", x: 0, z: 60, yaw: Math.PI, width: 12, length: 16, height: 2.1, topScale: 0.32 },
+      { type: "mound", x: 0, z: -60, yaw: 0, width: 12, length: 16, height: 2.1, topScale: 0.32 },
+    ],
+    spawnPoints: makeOuterSpawnPoints(60, Math.PI / 8),
+  },
+};
