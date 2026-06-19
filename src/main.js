@@ -1628,7 +1628,7 @@ function disposeOwnedObjectTree(object) {
   const ownedMaterials = new Set();
   const disposedGeometries = new Set();
   object.traverse((child) => {
-    if (child.geometry && !disposedGeometries.has(child.geometry)) {
+    if (child.geometry && !child.userData?.sharedGeometry && !disposedGeometries.has(child.geometry)) {
       child.geometry.dispose();
       disposedGeometries.add(child.geometry);
     }
@@ -1904,6 +1904,7 @@ let carBodyVisualResources = null;
 let globalCarBodyVisuals = null;
 const maxCarBodyVisualCars = 8;
 const freeCarBodyVisualSlots = [];
+const activeCarBodyVisualSlots = new Set();
 let nextCarBodyVisualSlot = 0;
 
 function makeTransformedGeometry(geometry, position, rotationZ = 0) {
@@ -1957,9 +1958,14 @@ function getCarBodyVisualResources() {
     ]);
     pipeGeometry.dispose();
     pipeCoreGeometry.dispose();
+    const bodyGeometry = makeStuntCarBodyGeometry();
+    const canopyGeometry = makeStuntCarCanopyGeometry();
 
     carBodyVisualResources = {
-      canopyGeometry: makeStuntCarCanopyGeometry(),
+      bodyGeometry,
+      bodyEdgeGeometry: makeStuntCarBodyEdgeGeometry(),
+      canopyEdgeGeometry: new THREE.EdgesGeometry(canopyGeometry, 24),
+      canopyGeometry,
       trimGeometry,
       exhaustGeometry,
       exhaustGlowGeometry,
@@ -2004,6 +2010,10 @@ function getGlobalCarBodyVisuals() {
   trim.instanceMatrix.needsUpdate = true;
   exhaust.instanceMatrix.needsUpdate = true;
   exhaustGlow.instanceMatrix.needsUpdate = true;
+  canopy.count = 0;
+  trim.count = 0;
+  exhaust.count = 0;
+  exhaustGlow.count = 0;
 
   group.add(canopy, trim, exhaust, exhaustGlow);
   scene.add(group);
@@ -2011,12 +2021,35 @@ function getGlobalCarBodyVisuals() {
   return globalCarBodyVisuals;
 }
 
+function highestActiveSlot(slots) {
+  let highest = -1;
+  for (const slot of slots) highest = Math.max(highest, slot);
+  return highest;
+}
+
+function updateCarBodyVisualCount() {
+  if (!globalCarBodyVisuals) return;
+  const count = highestActiveSlot(activeCarBodyVisualSlots) + 1;
+  globalCarBodyVisuals.canopy.count = count;
+  globalCarBodyVisuals.trim.count = count;
+  globalCarBodyVisuals.exhaust.count = count;
+  globalCarBodyVisuals.exhaustGlow.count = count;
+}
+
+function showCarBodyVisuals(carBodyVisuals) {
+  if (!carBodyVisuals) return;
+  activeCarBodyVisualSlots.add(carBodyVisuals.slot);
+  updateCarBodyVisualCount();
+}
+
 function makeCarBodyVisuals(colorHex) {
   const visuals = getGlobalCarBodyVisuals();
   const slot = freeCarBodyVisualSlots.pop() ?? nextCarBodyVisualSlot;
   if (slot >= maxCarBodyVisualCars) throw new Error(`No car body visual slot available for car ${slot + 1}`);
   if (slot === nextCarBodyVisualSlot) nextCarBodyVisualSlot += 1;
-  return { slot, ...visuals };
+  const carBodyVisuals = { slot, ...visuals };
+  showCarBodyVisuals(carBodyVisuals);
+  return carBodyVisuals;
 }
 
 function setCarBodyVisualMatrix(carBodyVisuals, matrix) {
@@ -2031,6 +2064,8 @@ function setCarBodyVisualMatrix(carBodyVisuals, matrix) {
 function hideCarBodyVisuals(carBodyVisuals) {
   setCarBodyVisualMatrix(carBodyVisuals, hiddenWheelMatrix);
   if (!carBodyVisuals) return;
+  activeCarBodyVisualSlots.delete(carBodyVisuals.slot);
+  updateCarBodyVisualCount();
   carBodyVisuals.canopy.instanceMatrix.needsUpdate = true;
   carBodyVisuals.trim.instanceMatrix.needsUpdate = true;
   carBodyVisuals.exhaust.instanceMatrix.needsUpdate = true;
@@ -2058,6 +2093,7 @@ function makeCarBodyVisual(color = 0xff512f) {
     bodyGlowMaterial,
     warmEdgeMaterial,
   } = getSharedCarMaterials();
+  const resources = getCarBodyVisualResources();
   const bodyMaterial = new THREE.MeshStandardMaterial({
     color,
     roughness: 0.9,
@@ -2066,22 +2102,23 @@ function makeCarBodyVisual(color = 0xff512f) {
   });
   bodyMaterial.userData.disposeWithOwner = true;
 
-  const body = new THREE.Mesh(makeStuntCarBodyGeometry(), bodyMaterial);
+  const body = new THREE.Mesh(resources.bodyGeometry, bodyMaterial);
   body.castShadow = true;
   body.receiveShadow = false;
+  body.userData.sharedGeometry = true;
   group.add(body);
-  const canopyGeometry = makeStuntCarCanopyGeometry();
-  const bodyEdges = makeStuntCarBodyEdgeGeometry();
-  const bodyEdgeLines = new THREE.LineSegments(bodyEdges, bodyEdgeMaterial);
+  const bodyEdgeLines = new THREE.LineSegments(resources.bodyEdgeGeometry, bodyEdgeMaterial);
   bodyEdgeLines.renderOrder = 1;
+  bodyEdgeLines.userData.sharedGeometry = true;
   group.add(bodyEdgeLines);
-  const bodyGlowLines = new THREE.LineSegments(bodyEdges, bodyGlowMaterial);
+  const bodyGlowLines = new THREE.LineSegments(resources.bodyEdgeGeometry, bodyGlowMaterial);
   bodyGlowLines.renderOrder = 2;
+  bodyGlowLines.userData.sharedGeometry = true;
   group.add(bodyGlowLines);
-  const canopyEdgeLines = new THREE.LineSegments(new THREE.EdgesGeometry(canopyGeometry, 24), warmEdgeMaterial);
+  const canopyEdgeLines = new THREE.LineSegments(resources.canopyEdgeGeometry, warmEdgeMaterial);
   canopyEdgeLines.renderOrder = 2;
+  canopyEdgeLines.userData.sharedGeometry = true;
   group.add(canopyEdgeLines);
-  canopyGeometry.dispose();
 
   group.userData.bodyVisuals = makeCarBodyVisuals(color);
   group.userData.bodyMaterial = bodyMaterial;
@@ -2097,6 +2134,7 @@ const maxWheelVisualCars = 8;
 const wheelsPerCar = 4;
 let globalWheelVisuals = null;
 const freeWheelVisualSlots = [];
+const activeWheelVisualSlots = new Set();
 let nextWheelVisualSlot = 0;
 const hiddenWheelMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
 
@@ -2163,6 +2201,9 @@ function getGlobalWheelVisuals() {
   tires.instanceMatrix.needsUpdate = true;
   rims.instanceMatrix.needsUpdate = true;
   hubs.instanceMatrix.needsUpdate = true;
+  tires.count = 0;
+  rims.count = 0;
+  hubs.count = 0;
 
   group.add(tires, rims, hubs);
   scene.add(group);
@@ -2170,12 +2211,28 @@ function getGlobalWheelVisuals() {
   return globalWheelVisuals;
 }
 
+function updateWheelVisualCount() {
+  if (!globalWheelVisuals) return;
+  const count = (highestActiveSlot(activeWheelVisualSlots) + 1) * wheelsPerCar;
+  globalWheelVisuals.tires.count = count;
+  globalWheelVisuals.rims.count = count;
+  globalWheelVisuals.hubs.count = count;
+}
+
+function showWheelVisuals(wheelVisuals) {
+  if (!wheelVisuals) return;
+  activeWheelVisualSlots.add(wheelVisuals.slot);
+  updateWheelVisualCount();
+}
+
 function makeWheelVisuals() {
   const visuals = getGlobalWheelVisuals();
   const slot = freeWheelVisualSlots.pop() ?? nextWheelVisualSlot;
   if (slot >= maxWheelVisualCars) throw new Error(`No wheel visual slot available for car ${slot + 1}`);
   if (slot === nextWheelVisualSlot) nextWheelVisualSlot += 1;
-  return { slot, tires: visuals.tires, rims: visuals.rims, hubs: visuals.hubs };
+  const wheelVisuals = { slot, tires: visuals.tires, rims: visuals.rims, hubs: visuals.hubs };
+  showWheelVisuals(wheelVisuals);
+  return wheelVisuals;
 }
 
 function releaseWheelVisuals(wheelVisuals) {
@@ -2189,49 +2246,65 @@ function releaseWheelVisuals(wheelVisuals) {
   wheelVisuals.tires.instanceMatrix.needsUpdate = true;
   wheelVisuals.rims.instanceMatrix.needsUpdate = true;
   wheelVisuals.hubs.instanceMatrix.needsUpdate = true;
+  activeWheelVisualSlots.delete(wheelVisuals.slot);
+  updateWheelVisualCount();
   freeWheelVisualSlots.push(wheelVisuals.slot);
+}
+
+let boostFlameResources = null;
+
+function getBoostFlameResources() {
+  if (!boostFlameResources) {
+    boostFlameResources = {
+      outerGeometry: new THREE.ConeGeometry(0.3, 1.55, 18).rotateX(-Math.PI / 2),
+      innerGeometry: new THREE.ConeGeometry(0.19, 1.08, 16).rotateX(-Math.PI / 2),
+      coreGeometry: new THREE.ConeGeometry(0.09, 0.62, 12).rotateX(-Math.PI / 2),
+      outerMaterial: new THREE.MeshBasicMaterial({
+        color: 0xff5a1f,
+        transparent: true,
+        opacity: 0.78,
+        depthWrite: false,
+      }),
+      innerMaterial: new THREE.MeshBasicMaterial({
+        color: 0xfff1a8,
+        transparent: true,
+        opacity: 0.9,
+        depthWrite: false,
+      }),
+      coreMaterial: new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.68,
+        depthWrite: false,
+      }),
+    };
+  }
+  return boostFlameResources;
+}
+
+function makeBoostFlameMesh(geometry, material, x, z) {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.set(x, 0.04, z);
+  mesh.userData.sharedGeometry = true;
+  return mesh;
 }
 
 function makeBoostFlame() {
   const group = new THREE.Group();
-  const outerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xff5a1f,
-    transparent: true,
-    opacity: 0.78,
-    depthWrite: false,
-  });
-  const innerMaterial = new THREE.MeshBasicMaterial({
-    color: 0xfff1a8,
-    transparent: true,
-    opacity: 0.9,
-    depthWrite: false,
-  });
-  const coreMaterial = new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.68,
-    depthWrite: false,
-  });
-
+  const resources = getBoostFlameResources();
   for (const x of [-0.24, 0.24]) {
-    const outer = new THREE.Mesh(new THREE.ConeGeometry(0.3, 1.55, 18).rotateX(-Math.PI / 2), outerMaterial);
-    outer.position.set(x, 0.04, -2.5);
-    const inner = new THREE.Mesh(new THREE.ConeGeometry(0.19, 1.08, 16).rotateX(-Math.PI / 2), innerMaterial);
-    inner.position.set(x, 0.04, -2.34);
-    const core = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.62, 12).rotateX(-Math.PI / 2), coreMaterial);
-    core.position.set(x, 0.04, -2.16);
-    group.add(outer, inner, core);
+    group.add(
+      makeBoostFlameMesh(resources.outerGeometry, resources.outerMaterial, x, -2.5),
+      makeBoostFlameMesh(resources.innerGeometry, resources.innerMaterial, x, -2.34),
+      makeBoostFlameMesh(resources.coreGeometry, resources.coreMaterial, x, -2.16),
+    );
   }
   const light = new THREE.PointLight(0xff7a2b, 2.2, 6, 2.2);
   light.position.set(0, 0.04, -1.98);
 
   group.add(light);
   group.visible = false;
-  outerMaterial.userData.disposeWithOwner = true;
-  innerMaterial.userData.disposeWithOwner = true;
-  coreMaterial.userData.disposeWithOwner = true;
   group.userData.light = light;
-  group.userData.ownedMaterials = [outerMaterial, innerMaterial, coreMaterial];
   return group;
 }
 
@@ -2676,6 +2749,8 @@ function hideWheelVisuals(wheelVisuals) {
   wheelVisuals.tires.instanceMatrix.needsUpdate = true;
   wheelVisuals.rims.instanceMatrix.needsUpdate = true;
   wheelVisuals.hubs.instanceMatrix.needsUpdate = true;
+  activeWheelVisualSlots.delete(wheelVisuals.slot);
+  updateWheelVisualCount();
 }
 
 function deactivateCar(car) {
@@ -2705,6 +2780,8 @@ function activateCar(car) {
     car.activeInWorld = true;
   }
   car.visual.visible = true;
+  showCarBodyVisuals(car.bodyVisuals);
+  showWheelVisuals(car.wheelVisuals);
 }
 
 function destroyCar(car) {
