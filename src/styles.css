@@ -395,8 +395,16 @@ body[data-phase="ended"] .jump-button {
   min-width: 260px;
 }
 
-.hud > .timer {
+.hud > .round-actions {
   justify-self: end;
+}
+
+.round-actions {
+  display: grid;
+  justify-items: end;
+  gap: 7px;
+  min-width: 112px;
+  pointer-events: auto;
 }
 
 .timer {
@@ -416,6 +424,39 @@ body[data-phase="ended"] .jump-button {
   box-shadow:
     0 0 14px rgba(255, 95, 31, 0.14),
     inset 0 0 12px rgba(255, 209, 118, 0.06);
+}
+
+.menu-return {
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  padding: 6px 11px;
+  border: 1px solid rgba(255, 138, 42, 0.34);
+  border-radius: 7px;
+  background:
+    linear-gradient(180deg, rgba(255, 138, 42, 0.12), rgba(255, 75, 31, 0.05)),
+    rgba(8, 6, 5, 0.68);
+  color: #ffd48a;
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  box-shadow:
+    0 0 12px rgba(255, 95, 31, 0.1),
+    inset 0 0 10px rgba(255, 209, 118, 0.04);
+  touch-action: manipulation;
+}
+
+.menu-return:hover,
+.menu-return:focus-visible {
+  border-color: rgba(255, 209, 118, 0.58);
+  color: #fff0a8;
+  outline: none;
+}
+
+.menu-return:active {
+  transform: translateY(1px);
 }
 
 .it-banner {
@@ -907,6 +948,17 @@ body[data-phase="ended"] .jump-button {
   .timer {
     min-width: 82px;
     font-size: 23px;
+  }
+
+  .round-actions {
+    min-width: 82px;
+  }
+
+  .menu-return {
+    min-width: 0;
+    min-height: 28px;
+    padding: 5px 9px;
+    font-size: 10px;
   }
 
   .leaderboard {

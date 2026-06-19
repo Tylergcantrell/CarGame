@@ -23,6 +23,7 @@ import {
   wheelOptions,
   wheelPositions,
 } from "./vehicle-config.js";
+import galaxySkyboxUrl from "./assets/sky/galaxy-skybox.webp";
 import "./styles.css";
 
 const canvas = document.querySelector("#game");
@@ -83,20 +84,27 @@ const wheelRayBestPoint = new CANNON.Vec3();
 const wheelRayContactVelocity = new CANNON.Vec3();
 const wheelLocalChassisUp = new CANNON.Vec3(0, 1, 0);
 const wheelChassisUp = new CANNON.Vec3();
+const arenaSurfaceRayHit = {
+  hasHit: false,
+  distance: 0,
+  point: new THREE.Vector3(),
+  normal: new THREE.Vector3(0, 1, 0),
+};
+const arenaRayBounds = {
+  minX: 0,
+  maxX: 0,
+  minY: 0,
+  maxY: 0,
+  minZ: 0,
+  maxZ: 0,
+};
 const savedChassisPosition = new CANNON.Vec3();
 const savedChassisQuaternion = new CANNON.Quaternion();
-const cameraCollisionMeshes = [];
-const cameraRaycaster = new THREE.Raycaster();
-const cameraRayHits = [];
-const cameraCandidates = Array.from({ length: 11 }, () => new THREE.Vector3());
 const cameraToCandidate = new THREE.Vector3();
-const cameraPathSample = new THREE.Vector3();
-const cameraSafeDirection = new THREE.Vector3();
 const cameraSafeOffset = new THREE.Vector3();
 const cameraRawForward = new THREE.Vector3();
 const cameraRawUp = new THREE.Vector3();
 const cameraRawRight = new THREE.Vector3();
-const cameraResolvedUp = new THREE.Vector3();
 const countdownCameraStart = new THREE.Vector3();
 const countdownCameraEnd = new THREE.Vector3();
 const countdownCameraTargetStart = new THREE.Vector3();
@@ -225,6 +233,201 @@ function makeArenaWallPanelEdgeGeometry() {
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geometry.computeBoundingSphere();
   return geometry;
+}
+
+function addArenaSurfaceTriangle(triangles, a, b, c) {
+  const normal = new THREE.Vector3()
+    .subVectors(b, a)
+    .cross(new THREE.Vector3().subVectors(c, a))
+    .normalize();
+  triangles.push({
+    a: a.clone(),
+    b: b.clone(),
+    c: c.clone(),
+    normal,
+    minX: Math.min(a.x, b.x, c.x),
+    maxX: Math.max(a.x, b.x, c.x),
+    minY: Math.min(a.y, b.y, c.y),
+    maxY: Math.max(a.y, b.y, c.y),
+    minZ: Math.min(a.z, b.z, c.z),
+    maxZ: Math.max(a.z, b.z, c.z),
+  });
+}
+
+function addArenaSurfaceGeometry(triangles, geometry, matrix) {
+  const position = geometry.getAttribute("position");
+  const index = geometry.getIndex();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const setVertex = (target, vertexIndex) => {
+    target.fromBufferAttribute(position, vertexIndex).applyMatrix4(matrix);
+  };
+
+  if (index) {
+    for (let i = 0; i < index.count; i += 3) {
+      setVertex(a, index.getX(i));
+      setVertex(b, index.getX(i + 1));
+      setVertex(c, index.getX(i + 2));
+      addArenaSurfaceTriangle(triangles, a, b, c);
+    }
+    return;
+  }
+
+  for (let i = 0; i < position.count; i += 3) {
+    setVertex(a, i);
+    setVertex(b, i + 1);
+    setVertex(c, i + 2);
+    addArenaSurfaceTriangle(triangles, a, b, c);
+  }
+}
+
+function makeArenaSurface(definition) {
+  const surface = {
+    wallTriangles: [],
+    featureTriangles: [],
+  };
+
+  for (let j = 0; j < arenaWallRings; j += 1) {
+    const theta0 = (j / arenaWallRings) * Math.PI;
+    const theta1 = ((j + 1) / arenaWallRings) * Math.PI;
+    for (let i = 0; i < arenaWallSegments; i += 1) {
+      const phi0 = (i / arenaWallSegments) * Math.PI * 2;
+      const phi1 = ((i + 1) / arenaWallSegments) * Math.PI * 2;
+      const p00 = new THREE.Vector3();
+      const p01 = new THREE.Vector3();
+      const p10 = new THREE.Vector3();
+      const p11 = new THREE.Vector3();
+      setArenaWallGridPoint(p00, tmpVec3A, theta0, phi0);
+      setArenaWallGridPoint(p01, tmpVec3A, theta0, phi1);
+      setArenaWallGridPoint(p10, tmpVec3A, theta1, phi0);
+      setArenaWallGridPoint(p11, tmpVec3A, theta1, phi1);
+      addArenaSurfaceTriangle(surface.wallTriangles, p00, p01, p10);
+      addArenaSurfaceTriangle(surface.wallTriangles, p01, p11, p10);
+    }
+  }
+
+  for (const feature of definition.mounds) {
+    const obstacle = {
+      type: feature.type,
+      width: feature.width,
+      length: feature.length,
+      height: feature.height,
+      topScale: feature.topScale,
+    };
+    const geometry = makeArenaObstacleGeometry(obstacle);
+    tmpMatrix
+      .makeRotationY(feature.yaw ?? 0)
+      .setPosition(feature.x, 0, feature.z);
+    addArenaSurfaceGeometry(surface.featureTriangles, geometry, tmpMatrix);
+    geometry.dispose();
+  }
+
+  return surface;
+}
+
+function raySegmentTriangleT(from, dir, tri, bounds) {
+  if (
+    bounds.maxX < tri.minX ||
+    bounds.minX > tri.maxX ||
+    bounds.maxY < tri.minY ||
+    bounds.minY > tri.maxY ||
+    bounds.maxZ < tri.minZ ||
+    bounds.minZ > tri.maxZ
+  ) {
+    return null;
+  }
+
+  const ax = tri.a.x;
+  const ay = tri.a.y;
+  const az = tri.a.z;
+  const edge1x = tri.b.x - ax;
+  const edge1y = tri.b.y - ay;
+  const edge1z = tri.b.z - az;
+  const edge2x = tri.c.x - ax;
+  const edge2y = tri.c.y - ay;
+  const edge2z = tri.c.z - az;
+  const pvecX = dir.y * edge2z - dir.z * edge2y;
+  const pvecY = dir.z * edge2x - dir.x * edge2z;
+  const pvecZ = dir.x * edge2y - dir.y * edge2x;
+  const det = edge1x * pvecX + edge1y * pvecY + edge1z * pvecZ;
+  if (Math.abs(det) < 1e-8) return null;
+
+  const invDet = 1 / det;
+  const tvecX = from.x - ax;
+  const tvecY = from.y - ay;
+  const tvecZ = from.z - az;
+  const u = (tvecX * pvecX + tvecY * pvecY + tvecZ * pvecZ) * invDet;
+  if (u < -1e-5 || u > 1 + 1e-5) return null;
+
+  const qvecX = tvecY * edge1z - tvecZ * edge1y;
+  const qvecY = tvecZ * edge1x - tvecX * edge1z;
+  const qvecZ = tvecX * edge1y - tvecY * edge1x;
+  const v = (dir.x * qvecX + dir.y * qvecY + dir.z * qvecZ) * invDet;
+  if (v < -1e-5 || u + v > 1 + 1e-5) return null;
+
+  const t = (edge2x * qvecX + edge2y * qvecY + edge2z * qvecZ) * invDet;
+  return t >= -1e-5 && t <= 1 + 1e-5 ? THREE.MathUtils.clamp(t, 0, 1) : null;
+}
+
+function raycastArenaSurface(from, to, hit = arenaSurfaceRayHit) {
+  const surface = activeArenaRuntime?.surface;
+  hit.hasHit = false;
+  if (!surface) return hit;
+
+  tmpVec3A.set(from.x, from.y, from.z);
+  tmpVec3B.set(to.x, to.y, to.z);
+  tmpVec3C.subVectors(tmpVec3B, tmpVec3A);
+  const segmentLength = tmpVec3C.length();
+  if (segmentLength <= 0.0001) return hit;
+  arenaRayBounds.minX = Math.min(tmpVec3A.x, tmpVec3B.x);
+  arenaRayBounds.maxX = Math.max(tmpVec3A.x, tmpVec3B.x);
+  arenaRayBounds.minY = Math.min(tmpVec3A.y, tmpVec3B.y);
+  arenaRayBounds.maxY = Math.max(tmpVec3A.y, tmpVec3B.y);
+  arenaRayBounds.minZ = Math.min(tmpVec3A.z, tmpVec3B.z);
+  arenaRayBounds.maxZ = Math.max(tmpVec3A.z, tmpVec3B.z);
+
+  let bestT = Infinity;
+  const recordHit = (t, normal) => {
+    if (t < 0 || t > 1 || t >= bestT) return;
+    bestT = t;
+    hit.hasHit = true;
+    hit.distance = segmentLength * t;
+    hit.point.copy(tmpVec3A).addScaledVector(tmpVec3C, t);
+    hit.normal.copy(normal);
+    if (hit.normal.dot(tmpVec3C) > 0) hit.normal.multiplyScalar(-1);
+  };
+
+  if (Math.abs(tmpVec3C.y) > 1e-6) {
+    const floorT = -tmpVec3A.y / tmpVec3C.y;
+    const floorX = tmpVec3A.x + tmpVec3C.x * floorT;
+    const floorZ = tmpVec3A.z + tmpVec3C.z * floorT;
+    if (floorT >= 0 && floorT <= 1 && Math.hypot(floorX, floorZ) <= worldSpec.floorRadius + 0.01) {
+      recordHit(floorT, upAxis);
+    }
+
+    const ceilingT = (worldSpec.ceilingY - tmpVec3A.y) / tmpVec3C.y;
+    const ceilingX = tmpVec3A.x + tmpVec3C.x * ceilingT;
+    const ceilingZ = tmpVec3A.z + tmpVec3C.z * ceilingT;
+    if (ceilingT >= 0 && ceilingT <= 1 && Math.hypot(ceilingX, ceilingZ) <= worldSpec.floorRadius + 0.01) {
+      recordHit(ceilingT, tmpVec3D.set(0, -1, 0));
+    }
+  }
+
+  for (const tri of surface.featureTriangles) {
+    const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
+    if (t !== null) recordHit(t, tri.normal);
+  }
+
+  const maxRadius = Math.max(Math.hypot(tmpVec3A.x, tmpVec3A.z), Math.hypot(tmpVec3B.x, tmpVec3B.z));
+  if (maxRadius >= worldSpec.floorRadius - segmentLength - 0.5) {
+    for (const tri of surface.wallTriangles) {
+      const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
+      if (t !== null) recordHit(t, tri.normal);
+    }
+  }
+
+  return hit;
 }
 
 function makeMoundGeometry(width, length, height, topScale = 0.36) {
@@ -935,6 +1138,7 @@ function addArenaPhysics(runtime, materials, definition) {
   arenaBody.collisionFilterGroup = collisionGroups.arena;
   arenaBody.collisionFilterMask = collisionGroups.car;
   runtime.physicsBodies.push(arenaBody);
+  runtime.surfaceBody = arenaBody;
 
   const floorShape = new CANNON.Plane();
   const floorQuat = new CANNON.Quaternion();
@@ -1011,20 +1215,19 @@ function addArenaPhysics(runtime, materials, definition) {
   runtime.group.add(wallEdgeLines);
 }
 
-function makeSeededRandom(seed = 0x7d3a19) {
-  let value = seed >>> 0;
-  return () => {
-    value = (value * 1664525 + 1013904223) >>> 0;
-    return value / 0x100000000;
-  };
-}
-
 function addStarSkybox() {
-  const random = makeSeededRandom(0x9e462b);
+  const texture = new THREE.TextureLoader().load(galaxySkyboxUrl);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.ClampToEdgeWrapping;
+  texture.repeat.set(2, 1);
+  texture.anisotropy = 1;
+
   const sky = new THREE.Mesh(
-    new THREE.SphereGeometry(610, 24, 12),
+    new THREE.SphereGeometry(610, 32, 16),
     new THREE.MeshBasicMaterial({
-      color: 0x020206,
+      map: texture,
+      color: 0x625978,
       side: THREE.BackSide,
       fog: false,
       depthWrite: false,
@@ -1032,42 +1235,6 @@ function addStarSkybox() {
   );
   sky.renderOrder = -20;
   scene.add(sky);
-
-  const starCount = coarsePointer ? 180 : 300;
-  const positions = new Float32Array(starCount * 3);
-  const colors = new Float32Array(starCount * 3);
-  const color = new THREE.Color();
-  for (let i = 0; i < starCount; i += 1) {
-    const yaw = random() * Math.PI * 2;
-    const pitch = Math.asin(random() * 2 - 1);
-    const radius = 380 + random() * 220;
-    const cosPitch = Math.cos(pitch);
-    positions[i * 3] = Math.cos(yaw) * cosPitch * radius;
-    positions[i * 3 + 1] = Math.sin(pitch) * radius;
-    positions[i * 3 + 2] = Math.sin(yaw) * cosPitch * radius;
-
-    color.setHSL(random() < 0.28 ? 0.1 : 0.58, random() < 0.2 ? 0.48 : 0.12, 0.62 + random() * 0.22);
-    colors[i * 3] = color.r;
-    colors[i * 3 + 1] = color.g;
-    colors[i * 3 + 2] = color.b;
-  }
-  const starGeometry = new THREE.BufferGeometry();
-  starGeometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  starGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  const stars = new THREE.Points(
-    starGeometry,
-    new THREE.PointsMaterial({
-      size: coarsePointer ? 0.58 : 0.48,
-      sizeAttenuation: false,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.55,
-      depthWrite: false,
-      fog: false,
-    }),
-  );
-  stars.renderOrder = -19;
-  scene.add(stars);
 }
 
 function makeArenaMaterials(theme) {
@@ -1102,7 +1269,7 @@ function makeArenaMaterials(theme) {
     wallMaterial: new THREE.MeshBasicMaterial({
       color: theme.wallFill,
       transparent: true,
-      opacity: 0.34,
+      opacity: 0.42,
       depthWrite: false,
       side: THREE.FrontSide,
       fog: false,
@@ -1196,7 +1363,6 @@ function addLaunchMound({ type = "mound", position, yaw, width, length, height, 
   mesh.castShadow = false;
   mesh.receiveShadow = true;
   runtime.group.add(mesh);
-  cameraCollisionMeshes.push(mesh);
 
   const edgeLines = new THREE.LineSegments(makeArenaObstacleEdgeGeometry(obstacle, geometry), materials.rampEdgeMaterial);
   edgeLines.position.copy(position);
@@ -1210,7 +1376,6 @@ function clearArenaRuntime() {
   scene.remove(activeArenaRuntime.group);
   disposeObjectTree(activeArenaRuntime.group);
   disposeArenaMaterials(activeArenaRuntime.materials);
-  cameraCollisionMeshes.length = 0;
   activeArenaRuntime = null;
 }
 
@@ -1243,6 +1408,7 @@ function loadArena(id = "orange") {
     group: new THREE.Group(),
     physicsBodies: [],
     materials,
+    surface: makeArenaSurface(definition),
   };
 
   const floor = new THREE.Mesh(
@@ -1264,7 +1430,6 @@ function loadArena(id = "orange") {
   wallShell.receiveShadow = false;
   wallShell.castShadow = false;
   runtime.group.add(wallShell);
-  cameraCollisionMeshes.push(wallShell);
 
   scene.add(runtime.group);
   activeArenaRuntime = runtime;
@@ -1651,6 +1816,7 @@ const startScreenEl = document.querySelector("#start-screen");
 const endScreenEl = document.querySelector("#end-screen");
 const startRoundButton = document.querySelector("#start-round");
 const playAgainButton = document.querySelector("#play-again");
+const menuReturnButton = document.querySelector("#menu-return");
 const roundTimeSelect = document.querySelector("#round-time");
 const playerCountSelect = document.querySelector("#player-count");
 const arenaSelect = document.querySelector("#arena-select");
@@ -1771,10 +1937,15 @@ function installVehicleWheelRayFilter(vehicle) {
 
     wheel.directionWorld.scale(rayLength, wheelRayVector);
     source.vadd(wheelRayVector, wheelRayBestPoint);
-    const oldCollisionResponse = chassisBody.collisionResponse;
-    chassisBody.collisionResponse = false;
-    physics.rayTest(source, wheelRayBestPoint, raycastResult);
-    chassisBody.collisionResponse = oldCollisionResponse;
+    const surfaceHit = raycastArenaSurface(source, wheelRayBestPoint);
+    if (surfaceHit.hasHit) {
+      raycastResult.hasHit = true;
+      raycastResult.distance = surfaceHit.distance;
+      raycastResult.hitPointWorld.set(surfaceHit.point.x, surfaceHit.point.y, surfaceHit.point.z);
+      raycastResult.hitNormalWorld.set(surfaceHit.normal.x, surfaceHit.normal.y, surfaceHit.normal.z);
+      raycastResult.body = activeArenaRuntime?.surfaceBody ?? null;
+      raycastResult.shape = null;
+    }
     chassisBody.vectorToWorldFrame(wheelLocalChassisUp, wheelChassisUp);
     const chassisSurfaceDot =
       wheelChassisUp.x * raycastResult.hitNormalWorld.x +
@@ -2708,33 +2879,16 @@ const cameraState = {
   resolvedPosition: new THREE.Vector3(),
 };
 
-function cameraLineBlocked(origin, candidate) {
-  const toCamera = cameraToCandidate.copy(candidate).sub(origin);
-  const distance = toCamera.length();
-  if (distance <= 0.001 || cameraCollisionMeshes.length === 0) return false;
-
-  cameraRaycaster.set(origin, toCamera.multiplyScalar(1 / distance));
-  cameraRaycaster.near = 0.85;
-  cameraRaycaster.far = distance - 0.4;
-  cameraRayHits.length = 0;
-  cameraRaycaster.intersectObjects(cameraCollisionMeshes, false, cameraRayHits);
-  return cameraRayHits.length > 0;
-}
-
 function clampCameraLineOfSight(origin, position, clearance = 1.35) {
   const toCamera = cameraToCandidate.copy(position).sub(origin);
   const distance = toCamera.length();
-  if (distance <= 0.001 || cameraCollisionMeshes.length === 0) return position;
+  if (distance <= 0.001) return position;
 
-  cameraRaycaster.set(origin, toCamera.multiplyScalar(1 / distance));
-  cameraRaycaster.near = 0.75;
-  cameraRaycaster.far = distance;
-  cameraRayHits.length = 0;
-  cameraRaycaster.intersectObjects(cameraCollisionMeshes, false, cameraRayHits);
-  if (cameraRayHits.length > 0) {
+  const hit = raycastArenaSurface(origin, position);
+  if (hit.hasHit) {
     position
       .copy(origin)
-      .addScaledVector(cameraRaycaster.ray.direction, Math.max(3.5, cameraRayHits[0].distance - clearance));
+      .addScaledVector(toCamera.multiplyScalar(1 / distance), Math.max(3.5, hit.distance - clearance));
   }
   return position;
 }
@@ -2743,69 +2897,6 @@ function keepCameraInsideArena(point, clearance = 1.15) {
   const contact = arenaContactForPoint(point);
   if (contact.distance < clearance) point.addScaledVector(contact.normal, clearance - contact.distance);
   return point;
-}
-
-function cameraArenaPathBlocked(origin, candidate, clearance = 1.05) {
-  const path = cameraToCandidate.copy(candidate).sub(origin);
-  const distance = path.length();
-  if (distance <= 0.001) return false;
-  const steps = Math.max(4, Math.ceil(distance / 3.2));
-  for (let i = 1; i <= steps; i += 1) {
-    cameraPathSample.copy(origin).addScaledVector(path, i / steps);
-    if (arenaContactForPoint(cameraPathSample).distance < clearance) return true;
-  }
-  return false;
-}
-
-function cameraPathBlocked(origin, candidate) {
-  return cameraArenaPathBlocked(origin, candidate) || cameraLineBlocked(origin, candidate);
-}
-
-function enforceCameraDistance(origin, candidate, minDistance = 8.5) {
-  const offset = cameraSafeOffset.copy(candidate).sub(origin);
-  const distance = offset.length();
-  if (distance >= minDistance || distance <= 0.001) return candidate;
-  candidate.copy(origin).addScaledVector(offset, minDistance / distance);
-  return candidate;
-}
-
-function resolveCameraPosition(origin, desiredPosition, cameraUp, carRight) {
-  const towardDesired = cameraState.towardDesired.copy(desiredPosition).sub(origin);
-  const distance = Math.max(0.001, towardDesired.length());
-  const chaseDirection = cameraSafeDirection.copy(towardDesired).multiplyScalar(1 / distance);
-  const minDistance = 8.5;
-  const preferredDistance = Math.max(distance, minDistance);
-
-  cameraCandidates[0].copy(desiredPosition);
-  cameraCandidates[1].copy(origin).addScaledVector(chaseDirection, preferredDistance).addScaledVector(cameraUp, 2.0);
-  cameraCandidates[2].copy(origin).addScaledVector(chaseDirection, preferredDistance).addScaledVector(cameraUp, 4.4);
-  cameraCandidates[3].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.92).addScaledVector(carRight, 3.6).addScaledVector(cameraUp, 3.1);
-  cameraCandidates[4].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.92).addScaledVector(carRight, -3.6).addScaledVector(cameraUp, 3.1);
-  cameraCandidates[5].copy(origin).addScaledVector(chaseDirection, preferredDistance * 1.14).addScaledVector(cameraUp, 5.2);
-  cameraCandidates[6].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.72).addScaledVector(cameraUp, 7.2);
-  cameraCandidates[7].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(cameraUp, 6.2);
-  cameraCandidates[8].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(carRight, 4.8).addScaledVector(cameraUp, 4.6);
-  cameraCandidates[9].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(carRight, -4.8).addScaledVector(cameraUp, 4.6);
-  cameraCandidates[10].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.55).addScaledVector(cameraUp, 9.0);
-
-  for (const candidate of cameraCandidates) {
-    enforceCameraDistance(origin, candidate, minDistance);
-    keepCameraInsideArena(candidate, 1.15);
-    if (!cameraPathBlocked(origin, candidate)) return cameraState.resolvedPosition.copy(candidate);
-  }
-
-  const direction = chaseDirection;
-  cameraRaycaster.set(origin, direction);
-  cameraRaycaster.near = 0.85;
-  cameraRaycaster.far = Math.max(minDistance, preferredDistance);
-  cameraRayHits.length = 0;
-  cameraRaycaster.intersectObjects(cameraCollisionMeshes, false, cameraRayHits);
-  const fallbackDistance = cameraRayHits.length > 0
-    ? Math.max(minDistance, cameraRayHits[0].distance - 1.25)
-    : Math.max(minDistance, preferredDistance * 0.72);
-  cameraState.resolvedPosition.copy(origin).addScaledVector(direction, fallbackDistance).addScaledVector(cameraUp, 6.2);
-  keepCameraInsideArena(cameraState.resolvedPosition, 1.25);
-  return cameraState.resolvedPosition;
 }
 
 function syncCarVisual(car, interpolationAlpha, visualTime) {
@@ -2995,17 +3086,13 @@ function syncVisuals(dt, interpolationAlpha) {
   const toDesired = cameraToCandidate.copy(desiredPosition).sub(cameraObstructionOrigin);
   const desiredDistance = toDesired.length();
   let cameraObstructed = false;
-  if (desiredDistance > 0.001 && cameraCollisionMeshes.length > 0) {
-    cameraRaycaster.set(cameraObstructionOrigin, toDesired.multiplyScalar(1 / desiredDistance));
-    cameraRaycaster.near = 0.75;
-    cameraRaycaster.far = desiredDistance;
-    cameraRayHits.length = 0;
-    cameraRaycaster.intersectObjects(cameraCollisionMeshes, false, cameraRayHits);
-    if (cameraRayHits.length > 0) {
+  if (desiredDistance > 0.001) {
+    const hit = raycastArenaSurface(cameraObstructionOrigin, desiredPosition);
+    if (hit.hasHit) {
       cameraObstructed = true;
       desiredPosition
         .copy(cameraObstructionOrigin)
-        .addScaledVector(cameraRaycaster.ray.direction, Math.max(3.5, cameraRayHits[0].distance - 1.35));
+        .addScaledVector(toDesired.multiplyScalar(1 / desiredDistance), Math.max(3.5, hit.distance - 1.35));
       keepCameraInsideArena(desiredPosition, 1.25);
     }
   }
@@ -3204,6 +3291,7 @@ roundTimeSelect.addEventListener("change", () => {
 });
 startRoundButton.addEventListener("click", startRound);
 playAgainButton.addEventListener("click", returnToMenu);
+menuReturnButton.addEventListener("click", returnToMenu);
 
 renderColorPicker();
 setUiPhase("menu");
