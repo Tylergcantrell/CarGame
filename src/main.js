@@ -132,6 +132,131 @@ const collisionGroups = {
   car: 2,
 };
 
+let profilePhase = "idle";
+const profileSampleLimit = 30000;
+const detailedProfile = {};
+
+function resetDetailedProfile(enabled = detailedProfile.enabled ?? false) {
+  detailedProfile.enabled = enabled;
+  detailedProfile.startedAt = performance.now();
+  detailedProfile.frames = 0;
+  detailedProfile.steps = 0;
+  detailedProfile.cappedFrames = 0;
+  detailedProfile.buckets = Object.create(null);
+  detailedProfile.samples = Object.create(null);
+  detailedProfile.raycasts = {
+    count: 0,
+    timeMs: 0,
+    byPhase: Object.create(null),
+  };
+}
+
+function recordProfileBucket(name, ms) {
+  if (!detailedProfile.enabled) return;
+  let bucket = detailedProfile.buckets[name];
+  if (!bucket) {
+    bucket = { count: 0, totalMs: 0, maxMs: 0 };
+    detailedProfile.buckets[name] = bucket;
+  }
+  bucket.count += 1;
+  bucket.totalMs += ms;
+  bucket.maxMs = Math.max(bucket.maxMs, ms);
+}
+
+function recordProfileSample(name, value) {
+  if (!detailedProfile.enabled) return;
+  let samples = detailedProfile.samples[name];
+  if (!samples) {
+    samples = [];
+    detailedProfile.samples[name] = samples;
+  }
+  if (samples.length < profileSampleLimit) samples.push(value);
+}
+
+function addProfileRaycast(ms) {
+  if (!detailedProfile.enabled) return;
+  detailedProfile.raycasts.count += 1;
+  detailedProfile.raycasts.timeMs += ms;
+  let phase = detailedProfile.raycasts.byPhase[profilePhase];
+  if (!phase) {
+    phase = { count: 0, totalMs: 0 };
+    detailedProfile.raycasts.byPhase[profilePhase] = phase;
+  }
+  phase.count += 1;
+  phase.totalMs += ms;
+}
+
+function setProfilePhase(phase) {
+  const previous = profilePhase;
+  profilePhase = phase;
+  return previous;
+}
+
+function percentile(sorted, p) {
+  if (!sorted.length) return 0;
+  const index = (sorted.length - 1) * p;
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+  if (lower === upper) return sorted[lower];
+  return THREE.MathUtils.lerp(sorted[lower], sorted[upper], index - lower);
+}
+
+function summarizeDetailedProfile() {
+  const elapsedMs = Math.max(0.001, performance.now() - detailedProfile.startedAt);
+  const buckets = {};
+  for (const [name, bucket] of Object.entries(detailedProfile.buckets)) {
+    buckets[name] = {
+      count: bucket.count,
+      totalMs: bucket.totalMs,
+      avgMs: bucket.totalMs / Math.max(1, bucket.count),
+      maxMs: bucket.maxMs,
+      msPerSecond: bucket.totalMs / elapsedMs * 1000,
+      msPerStep: bucket.totalMs / Math.max(1, detailedProfile.steps),
+    };
+  }
+
+  const samples = {};
+  for (const [name, values] of Object.entries(detailedProfile.samples)) {
+    const sorted = [...values].sort((a, b) => a - b);
+    samples[name] = {
+      count: values.length,
+      p50: percentile(sorted, 0.5),
+      p95: percentile(sorted, 0.95),
+      p99: percentile(sorted, 0.99),
+      max: sorted[sorted.length - 1] ?? 0,
+    };
+  }
+
+  const raycastByPhase = {};
+  for (const [phase, data] of Object.entries(detailedProfile.raycasts.byPhase)) {
+    raycastByPhase[phase] = {
+      count: data.count,
+      totalMs: data.totalMs,
+      avgMs: data.totalMs / Math.max(1, data.count),
+      perStep: data.count / Math.max(1, detailedProfile.steps),
+    };
+  }
+
+  return {
+    elapsedMs,
+    frames: detailedProfile.frames,
+    steps: detailedProfile.steps,
+    cappedFrames: detailedProfile.cappedFrames,
+    stepsPerSecond: detailedProfile.steps / elapsedMs * 1000,
+    buckets,
+    samples,
+    raycasts: {
+      count: detailedProfile.raycasts.count,
+      totalMs: detailedProfile.raycasts.timeMs,
+      avgMs: detailedProfile.raycasts.timeMs / Math.max(1, detailedProfile.raycasts.count),
+      perStep: detailedProfile.raycasts.count / Math.max(1, detailedProfile.steps),
+      byPhase: raycastByPhase,
+    },
+  };
+}
+
+resetDetailedProfile();
+
 const rightingClearanceSamplePoints = [
   new THREE.Vector3(0, -0.42, 0),
   new THREE.Vector3(-1.28, -0.42, 1.58),
@@ -371,63 +496,69 @@ function raySegmentTriangleT(from, dir, tri, bounds) {
 }
 
 function raycastArenaSurface(from, to, hit = arenaSurfaceRayHit) {
-  const surface = activeArenaRuntime?.surface;
-  hit.hasHit = false;
-  if (!surface) return hit;
+  const shouldProfile = detailedProfile.enabled;
+  const profileStart = shouldProfile ? performance.now() : 0;
+  try {
+    const surface = activeArenaRuntime?.surface;
+    hit.hasHit = false;
+    if (!surface) return hit;
 
-  tmpVec3A.set(from.x, from.y, from.z);
-  tmpVec3B.set(to.x, to.y, to.z);
-  tmpVec3C.subVectors(tmpVec3B, tmpVec3A);
-  const segmentLength = tmpVec3C.length();
-  if (segmentLength <= 0.0001) return hit;
-  arenaRayBounds.minX = Math.min(tmpVec3A.x, tmpVec3B.x);
-  arenaRayBounds.maxX = Math.max(tmpVec3A.x, tmpVec3B.x);
-  arenaRayBounds.minY = Math.min(tmpVec3A.y, tmpVec3B.y);
-  arenaRayBounds.maxY = Math.max(tmpVec3A.y, tmpVec3B.y);
-  arenaRayBounds.minZ = Math.min(tmpVec3A.z, tmpVec3B.z);
-  arenaRayBounds.maxZ = Math.max(tmpVec3A.z, tmpVec3B.z);
+    tmpVec3A.set(from.x, from.y, from.z);
+    tmpVec3B.set(to.x, to.y, to.z);
+    tmpVec3C.subVectors(tmpVec3B, tmpVec3A);
+    const segmentLength = tmpVec3C.length();
+    if (segmentLength <= 0.0001) return hit;
+    arenaRayBounds.minX = Math.min(tmpVec3A.x, tmpVec3B.x);
+    arenaRayBounds.maxX = Math.max(tmpVec3A.x, tmpVec3B.x);
+    arenaRayBounds.minY = Math.min(tmpVec3A.y, tmpVec3B.y);
+    arenaRayBounds.maxY = Math.max(tmpVec3A.y, tmpVec3B.y);
+    arenaRayBounds.minZ = Math.min(tmpVec3A.z, tmpVec3B.z);
+    arenaRayBounds.maxZ = Math.max(tmpVec3A.z, tmpVec3B.z);
 
-  let bestT = Infinity;
-  const recordHit = (t, normal) => {
-    if (t < 0 || t > 1 || t >= bestT) return;
-    bestT = t;
-    hit.hasHit = true;
-    hit.distance = segmentLength * t;
-    hit.point.copy(tmpVec3A).addScaledVector(tmpVec3C, t);
-    hit.normal.copy(normal);
-    if (hit.normal.dot(tmpVec3C) > 0) hit.normal.multiplyScalar(-1);
-  };
+    let bestT = Infinity;
+    const recordHit = (t, normal) => {
+      if (t < 0 || t > 1 || t >= bestT) return;
+      bestT = t;
+      hit.hasHit = true;
+      hit.distance = segmentLength * t;
+      hit.point.copy(tmpVec3A).addScaledVector(tmpVec3C, t);
+      hit.normal.copy(normal);
+      if (hit.normal.dot(tmpVec3C) > 0) hit.normal.multiplyScalar(-1);
+    };
 
-  if (Math.abs(tmpVec3C.y) > 1e-6) {
-    const floorT = -tmpVec3A.y / tmpVec3C.y;
-    const floorX = tmpVec3A.x + tmpVec3C.x * floorT;
-    const floorZ = tmpVec3A.z + tmpVec3C.z * floorT;
-    if (floorT >= 0 && floorT <= 1 && Math.hypot(floorX, floorZ) <= worldSpec.floorRadius + 0.01) {
-      recordHit(floorT, upAxis);
+    if (Math.abs(tmpVec3C.y) > 1e-6) {
+      const floorT = -tmpVec3A.y / tmpVec3C.y;
+      const floorX = tmpVec3A.x + tmpVec3C.x * floorT;
+      const floorZ = tmpVec3A.z + tmpVec3C.z * floorT;
+      if (floorT >= 0 && floorT <= 1 && Math.hypot(floorX, floorZ) <= worldSpec.floorRadius + 0.01) {
+        recordHit(floorT, upAxis);
+      }
+
+      const ceilingT = (worldSpec.ceilingY - tmpVec3A.y) / tmpVec3C.y;
+      const ceilingX = tmpVec3A.x + tmpVec3C.x * ceilingT;
+      const ceilingZ = tmpVec3A.z + tmpVec3C.z * ceilingT;
+      if (ceilingT >= 0 && ceilingT <= 1 && Math.hypot(ceilingX, ceilingZ) <= worldSpec.floorRadius + 0.01) {
+        recordHit(ceilingT, tmpVec3D.set(0, -1, 0));
+      }
     }
 
-    const ceilingT = (worldSpec.ceilingY - tmpVec3A.y) / tmpVec3C.y;
-    const ceilingX = tmpVec3A.x + tmpVec3C.x * ceilingT;
-    const ceilingZ = tmpVec3A.z + tmpVec3C.z * ceilingT;
-    if (ceilingT >= 0 && ceilingT <= 1 && Math.hypot(ceilingX, ceilingZ) <= worldSpec.floorRadius + 0.01) {
-      recordHit(ceilingT, tmpVec3D.set(0, -1, 0));
-    }
-  }
-
-  for (const tri of surface.featureTriangles) {
-    const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
-    if (t !== null) recordHit(t, tri.normal);
-  }
-
-  const maxRadius = Math.max(Math.hypot(tmpVec3A.x, tmpVec3A.z), Math.hypot(tmpVec3B.x, tmpVec3B.z));
-  if (maxRadius >= worldSpec.floorRadius - segmentLength - 0.5) {
-    for (const tri of surface.wallTriangles) {
+    for (const tri of surface.featureTriangles) {
       const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
       if (t !== null) recordHit(t, tri.normal);
     }
-  }
 
-  return hit;
+    const maxRadius = Math.max(Math.hypot(tmpVec3A.x, tmpVec3A.z), Math.hypot(tmpVec3B.x, tmpVec3B.z));
+    if (maxRadius >= worldSpec.floorRadius - segmentLength - 0.5) {
+      for (const tri of surface.wallTriangles) {
+        const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
+        if (t !== null) recordHit(t, tri.normal);
+      }
+    }
+
+    return hit;
+  } finally {
+    if (shouldProfile) addProfileRaycast(performance.now() - profileStart);
+  }
 }
 
 function makeMoundGeometry(width, length, height, topScale = 0.36) {
@@ -880,6 +1011,7 @@ function compactStaticMeshGroup(group) {
     bucket.castShadow ||= child.castShadow;
     bucket.receiveShadow ||= child.receiveShadow;
     group.remove(child);
+    child.geometry.dispose();
   }
 
   for (const bucket of buckets.values()) {
@@ -927,6 +1059,22 @@ function makeArenaObstacleGeometry(obstacle) {
 
 function makeArenaObstacleEdgeGeometry(obstacle, geometry) {
   return new THREE.EdgesGeometry(geometry);
+}
+
+function offsetArenaObstacleEdgeGeometry(geometry, amount = 0.035) {
+  const position = geometry.getAttribute("position");
+  for (let i = 0; i < position.count; i += 1) {
+    const x = position.getX(i);
+    const y = position.getY(i);
+    const z = position.getZ(i);
+    const flatLength = Math.hypot(x, z);
+    const outwardX = flatLength > 0.0001 ? x / flatLength : 0;
+    const outwardZ = flatLength > 0.0001 ? z / flatLength : 0;
+    position.setXYZ(i, x + outwardX * amount, y + amount, z + outwardZ * amount);
+  }
+  position.needsUpdate = true;
+  geometry.computeBoundingSphere();
+  return geometry;
 }
 
 function makeConvexShapeFromFlatVertices(flatVertices, faces) {
@@ -1299,10 +1447,8 @@ function makeArenaMaterials(theme) {
     }),
     rampEdgeMaterial: new THREE.LineBasicMaterial({
       color: theme.rampEdge,
-      depthTest: theme.rampEdgeDepthTest === true,
+      depthTest: false,
       depthWrite: false,
-      transparent: theme.rampEdgeOpacity !== undefined,
-      opacity: theme.rampEdgeOpacity ?? 1,
     }),
   };
 }
@@ -1315,6 +1461,24 @@ function disposeObjectTree(object) {
   object.traverse((child) => {
     if (child.geometry) child.geometry.dispose();
   });
+}
+
+function disposeOwnedObjectTree(object) {
+  const ownedMaterials = new Set();
+  object.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    for (const material of child.userData?.ownedMaterials ?? []) ownedMaterials.add(material);
+    const material = child.material;
+    if (Array.isArray(material)) {
+      for (const entry of material) {
+        if (entry?.userData?.disposeWithOwner) ownedMaterials.add(entry);
+      }
+    } else if (material?.userData?.disposeWithOwner) {
+      ownedMaterials.add(material);
+    }
+  });
+  for (const material of object.userData?.ownedMaterials ?? []) ownedMaterials.add(material);
+  for (const material of ownedMaterials) material.dispose();
 }
 
 addStarSkybox();
@@ -1370,6 +1534,50 @@ function addLaunchMound({ type = "mound", position, yaw, width, length, height, 
   runtime.group.add(edgeLines);
 }
 
+function extractGeometryMaterialGroup(source, materialIndex) {
+  const index = source.getIndex();
+  const position = source.getAttribute("position");
+  const normal = source.getAttribute("normal");
+  const uv = source.getAttribute("uv");
+  const positions = [];
+  const normals = normal ? [] : null;
+  const uvs = uv ? [] : null;
+
+  for (const group of source.groups) {
+    if (group.materialIndex !== materialIndex) continue;
+    const end = group.start + group.count;
+    for (let i = group.start; i < end; i += 1) {
+      const vertexIndex = index ? index.getX(i) : i;
+      positions.push(
+        position.getX(vertexIndex),
+        position.getY(vertexIndex),
+        position.getZ(vertexIndex),
+      );
+      if (normal) {
+        normals.push(
+          normal.getX(vertexIndex),
+          normal.getY(vertexIndex),
+          normal.getZ(vertexIndex),
+        );
+      }
+      if (uv) {
+        uvs.push(
+          uv.getX(vertexIndex),
+          uv.getY(vertexIndex),
+        );
+      }
+    }
+  }
+
+  if (positions.length === 0) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  if (normals) geometry.setAttribute("normal", new THREE.Float32BufferAttribute(normals, 3));
+  if (uvs) geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 function clearArenaRuntime() {
   if (!activeArenaRuntime) return;
   for (const body of activeArenaRuntime.physicsBodies) physics.removeBody(body);
@@ -1381,18 +1589,71 @@ function clearArenaRuntime() {
 
 function addArenaLayout(definition, runtime, materials) {
   const moundY = 0;
+  const topGeometries = [];
+  const sideGeometries = [];
+  const matrix = new THREE.Matrix4();
+  const quaternion = new THREE.Quaternion();
+  const position = new THREE.Vector3();
+  const scale = new THREE.Vector3(1, 1, 1);
+
   for (const mound of definition.mounds) {
-    addLaunchMound({
+    const obstacle = {
       type: mound.type,
-      position: new THREE.Vector3(mound.x, moundY, mound.z),
-      yaw: mound.yaw,
       width: mound.width,
       length: mound.length,
       height: mound.height,
       topScale: mound.topScale,
       gap: mound.gap,
       endScale: mound.endScale,
-    }, runtime, materials);
+    };
+    position.set(mound.x, moundY, mound.z);
+    quaternion.setFromAxisAngle(upAxis, mound.yaw ?? 0);
+    matrix.compose(position, quaternion, scale);
+
+    const geometry = makeArenaObstacleGeometry(obstacle);
+    const topGeometry = extractGeometryMaterialGroup(geometry, 0);
+    const sideGeometry = extractGeometryMaterialGroup(geometry, 1);
+    if (topGeometry) {
+      topGeometry.applyMatrix4(matrix);
+      topGeometries.push(topGeometry);
+    }
+    if (sideGeometry) {
+      sideGeometry.applyMatrix4(matrix);
+      sideGeometries.push(sideGeometry);
+    }
+
+    const edgeGeometry = offsetArenaObstacleEdgeGeometry(makeArenaObstacleEdgeGeometry(obstacle, geometry));
+    edgeGeometry.applyMatrix4(matrix);
+    const edgeLines = new THREE.LineSegments(edgeGeometry, materials.rampEdgeMaterial);
+    edgeLines.renderOrder = 1;
+    runtime.group.add(edgeLines);
+    geometry.dispose();
+  }
+
+  if (topGeometries.length > 0) {
+    const geometry = mergeGeometries(topGeometries, false);
+    for (const entry of topGeometries) {
+      if (entry !== geometry) entry.dispose();
+    }
+    if (geometry) {
+      const mesh = new THREE.Mesh(geometry, materials.rampTopMaterial);
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      runtime.group.add(mesh);
+    }
+  }
+
+  if (sideGeometries.length > 0) {
+    const geometry = mergeGeometries(sideGeometries, false);
+    for (const entry of sideGeometries) {
+      if (entry !== geometry) entry.dispose();
+    }
+    if (geometry) {
+      const mesh = new THREE.Mesh(geometry, materials.rampSideMaterial);
+      mesh.castShadow = false;
+      mesh.receiveShadow = true;
+      runtime.group.add(mesh);
+    }
   }
 }
 
@@ -1492,6 +1753,7 @@ function makeCarBodyVisual(color = 0xff512f) {
     metalness: 0.08,
     flatShading: true,
   });
+  bodyMaterial.userData.disposeWithOwner = true;
 
   function addBoxFeature(width, height, length, x, y, z, material, castShadow = true, rotationZ = 0) {
     const feature = new THREE.Mesh(new THREE.BoxGeometry(width, height, length), material);
@@ -1550,7 +1812,11 @@ function makeCarBodyVisual(color = 0xff512f) {
   }
 
   group.userData.bodyMaterial = bodyMaterial;
+  group.userData.ownedMaterials = [bodyMaterial];
   compactStaticMeshGroup(group);
+  group.traverse((child) => {
+    if (child.isMesh || child.isLineSegments) child.renderOrder = Math.max(child.renderOrder, 2);
+  });
   return group;
 }
 
@@ -1610,6 +1876,9 @@ function getGlobalWheelVisuals() {
   tires.frustumCulled = false;
   rims.frustumCulled = false;
   hubs.frustumCulled = false;
+  tires.renderOrder = 2;
+  rims.renderOrder = 2;
+  hubs.renderOrder = 2;
   tires.castShadow = true;
   rims.castShadow = false;
   hubs.castShadow = false;
@@ -1686,7 +1955,11 @@ function makeBoostFlame() {
 
   group.add(light);
   group.visible = false;
+  outerMaterial.userData.disposeWithOwner = true;
+  innerMaterial.userData.disposeWithOwner = true;
+  coreMaterial.userData.disposeWithOwner = true;
   group.userData.light = light;
+  group.userData.ownedMaterials = [outerMaterial, innerMaterial, coreMaterial];
   return group;
 }
 
@@ -2071,6 +2344,7 @@ function createCar({ id, name, color, isPlayer = false }) {
     tagMarker,
     wheelVisuals,
     input: makeInputState(),
+    activeInWorld: true,
     currentSteering: 0,
     boostTimeRemaining: 0,
     boostCooldownRemaining: 0,
@@ -2118,11 +2392,52 @@ function createCar({ id, name, color, isPlayer = false }) {
   return car;
 }
 
+function hideWheelVisuals(wheelVisuals) {
+  if (!wheelVisuals) return;
+  const baseIndex = wheelVisuals.slot * wheelsPerCar;
+  for (let i = 0; i < wheelsPerCar; i += 1) {
+    wheelVisuals.tires.setMatrixAt(baseIndex + i, hiddenWheelMatrix);
+    wheelVisuals.rims.setMatrixAt(baseIndex + i, hiddenWheelMatrix);
+    wheelVisuals.hubs.setMatrixAt(baseIndex + i, hiddenWheelMatrix);
+  }
+  wheelVisuals.tires.instanceMatrix.needsUpdate = true;
+  wheelVisuals.rims.instanceMatrix.needsUpdate = true;
+  wheelVisuals.hubs.instanceMatrix.needsUpdate = true;
+}
+
+function deactivateCar(car) {
+  clearVehicleInputs(car);
+  if (car.activeInWorld) {
+    car.vehicle.removeFromWorld(physics);
+    if (physics.bodies.includes(car.body)) physics.removeBody(car.body);
+    car.activeInWorld = false;
+  }
+  car.visual.visible = false;
+  car.boostFlame.visible = false;
+  car.tagMarker.visible = false;
+  car.input = makeInputState();
+  car.boostTimeRemaining = 0;
+  car.boostCooldownRemaining = 0;
+  car.manualRightingActive = false;
+  car.manualRightingElapsed = 0;
+  car.isIt = false;
+  car.immunityRemaining = 0;
+  hideWheelVisuals(car.wheelVisuals);
+}
+
+function activateCar(car) {
+  if (!car.activeInWorld) {
+    car.vehicle.addToWorld(physics);
+    car.activeInWorld = true;
+  }
+  car.visual.visible = true;
+}
+
 function destroyCar(car) {
-  car.vehicle.removeFromWorld(physics);
-  physics.removeBody(car.body);
+  deactivateCar(car);
   scene.remove(car.visual);
   scene.remove(car.tagMarker);
+  disposeOwnedObjectTree(car.visual);
   releaseWheelVisuals(car.wheelVisuals);
 }
 
@@ -2298,6 +2613,25 @@ function shuffle(array) {
 
 const playerCar = createCar({ id: "player", name: "you", color: carPalette[0], isPlayer: true });
 gameState.cars = [playerCar];
+const aiCarPool = [];
+
+function getPooledAiCar(index, color) {
+  let car = aiCarPool[index];
+  if (!car) {
+    car = createCar({ id: `ai-${index + 1}`, name: color.name, color, isPlayer: false });
+    deactivateCar(car);
+    aiCarPool[index] = car;
+  }
+  car.name = color.name;
+  setCarColor(car, color);
+  activateCar(car);
+  pickWaypoint(car);
+  return car;
+}
+
+function deactivateUnusedAiCars(activeCount) {
+  for (let i = activeCount; i < aiCarPool.length; i += 1) deactivateCar(aiCarPool[i]);
+}
 
 function renderColorPicker() {
   colorPickerEl.innerHTML = "";
@@ -2777,24 +3111,24 @@ function updateLeaderboard() {
 }
 
 function startRound() {
-  for (const car of gameState.aiCars) destroyCar(car);
-  gameState.aiCars = [];
-
+  clearTagBursts();
   gameState.roundLength = Number(roundTimeSelect.value);
   gameState.timeRemaining = gameState.roundLength;
   gameState.playerCount = Number(playerCountSelect.value);
   loadArena(arenaSelect.value);
+  activateCar(playerCar);
   setCarColor(playerCar, gameState.selectedColor);
 
   const availableColors = shuffle(carPalette.filter((color) => color !== gameState.selectedColor));
   gameState.cars = [playerCar];
+  gameState.aiCars = [];
   for (let i = 1; i < gameState.playerCount; i += 1) {
     const color = availableColors[(i - 1) % availableColors.length];
-    const aiCar = createCar({ id: `ai-${i}`, name: color.name, color, isPlayer: false });
-    pickWaypoint(aiCar);
+    const aiCar = getPooledAiCar(i - 1, color);
     gameState.aiCars.push(aiCar);
     gameState.cars.push(aiCar);
   }
+  deactivateUnusedAiCars(Math.max(0, gameState.playerCount - 1));
 
   const spawns = shuffle(getArenaSpawnPoints());
   gameState.cars.forEach((car, index) => spawnCarAt(car, spawns[index % spawns.length]));
@@ -2852,7 +3186,8 @@ function endRound() {
 function returnToMenu() {
   gameState.phase = "menu";
   setUiPhase("menu");
-  for (const car of gameState.aiCars) destroyCar(car);
+  clearTagBursts();
+  for (const car of gameState.aiCars) deactivateCar(car);
   gameState.aiCars = [];
   gameState.cars = [playerCar];
   gameState.itCar = null;
@@ -3115,6 +3450,154 @@ function syncVisuals(dt, interpolationAlpha) {
   updateHud();
 }
 
+function runUnprofiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) {
+  if (gameState.phase === "countdown") {
+    for (const car of gameState.cars) clearVehicleInputs(car);
+    updateCountdown(fixedStep);
+  } else if (gameState.phase === "playing") {
+    if (scriptedPlayer) {
+      playerCar.input.throttle = 1;
+      playerCar.input.steer = Math.sin(stepIndex * 0.055);
+      playerCar.input.boost = false;
+      if (stepIndex % 180 === 20) playerCar.input.boostQueued = true;
+      if (stepIndex % 300 === 80) playerCar.input.jumpQueued = true;
+    } else {
+      updatePlayerInput();
+    }
+
+    for (const car of gameState.aiCars) updateAiCar(car, fixedStep, aiUpdateContext);
+    for (const car of gameState.cars) {
+      driveCar(car);
+      applyAirControls(car);
+      applyBoost(car, fixedStep);
+    }
+    physics.step(fixedStep);
+    processPhysicsContacts();
+    for (const car of gameState.cars) applyQueuedJump(car);
+    for (const car of gameState.cars) updateManualRighting(car, fixedStep);
+    updateRound(fixedStep);
+  } else {
+    clearVehicleInputs(playerCar);
+    input.jumpQueued = false;
+    input.boostQueued = false;
+  }
+}
+
+function clearTagBursts() {
+  for (const burst of tagBursts) {
+    const data = burst.userData;
+    scene.remove(burst);
+    data.groundRing.material.dispose();
+    data.upperRing.material.dispose();
+  }
+  tagBursts.length = 0;
+}
+
+function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) {
+  if (!detailedProfile.enabled) {
+    runUnprofiledPlayingStep({ scriptedPlayer, stepIndex });
+    return;
+  }
+
+  const stepStart = performance.now();
+
+  if (gameState.phase === "countdown") {
+    const previousPhase = setProfilePhase("countdown");
+    const bucketStart = performance.now();
+    for (const car of gameState.cars) clearVehicleInputs(car);
+    updateCountdown(fixedStep);
+    recordProfileBucket("countdown", performance.now() - bucketStart);
+    profilePhase = previousPhase;
+  } else if (gameState.phase === "playing") {
+    let previousPhase = setProfilePhase("input");
+    let bucketStart = performance.now();
+    if (scriptedPlayer) {
+      playerCar.input.throttle = 1;
+      playerCar.input.steer = Math.sin(stepIndex * 0.055);
+      playerCar.input.boost = false;
+      if (stepIndex % 180 === 20) playerCar.input.boostQueued = true;
+      if (stepIndex % 300 === 80) playerCar.input.jumpQueued = true;
+    } else {
+      updatePlayerInput();
+    }
+    recordProfileBucket("input", performance.now() - bucketStart);
+    profilePhase = previousPhase;
+
+    for (const car of gameState.aiCars) {
+      previousPhase = setProfilePhase("ai");
+      bucketStart = performance.now();
+      updateAiCar(car, fixedStep, aiUpdateContext);
+      recordProfileBucket("ai", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+    }
+    for (const car of gameState.cars) {
+      previousPhase = setProfilePhase("drive");
+      bucketStart = performance.now();
+      driveCar(car);
+      recordProfileBucket("drive", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+
+      previousPhase = setProfilePhase("airControl");
+      bucketStart = performance.now();
+      applyAirControls(car);
+      recordProfileBucket("airControl", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+
+      previousPhase = setProfilePhase("boost");
+      bucketStart = performance.now();
+      applyBoost(car, fixedStep);
+      recordProfileBucket("boost", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+    }
+
+    previousPhase = setProfilePhase("physicsStep");
+    bucketStart = performance.now();
+    physics.step(fixedStep);
+    const physicsStepMs = performance.now() - bucketStart;
+    recordProfileBucket("physicsStep", physicsStepMs);
+    recordProfileSample("physicsStepMs", physicsStepMs);
+    profilePhase = previousPhase;
+
+    previousPhase = setProfilePhase("contacts");
+    bucketStart = performance.now();
+    processPhysicsContacts();
+    recordProfileBucket("contacts", performance.now() - bucketStart);
+    profilePhase = previousPhase;
+
+    for (const car of gameState.cars) {
+      previousPhase = setProfilePhase("jump");
+      bucketStart = performance.now();
+      applyQueuedJump(car);
+      recordProfileBucket("jump", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+    }
+    for (const car of gameState.cars) {
+      previousPhase = setProfilePhase("righting");
+      bucketStart = performance.now();
+      updateManualRighting(car, fixedStep);
+      recordProfileBucket("righting", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+    }
+
+    previousPhase = setProfilePhase("round");
+    bucketStart = performance.now();
+    updateRound(fixedStep);
+    recordProfileBucket("round", performance.now() - bucketStart);
+    profilePhase = previousPhase;
+  } else {
+    const previousPhase = setProfilePhase("idle");
+    const bucketStart = performance.now();
+    clearVehicleInputs(playerCar);
+    input.jumpQueued = false;
+    input.boostQueued = false;
+    recordProfileBucket("idle", performance.now() - bucketStart);
+    profilePhase = previousPhase;
+  }
+
+  detailedProfile.steps += 1;
+  recordProfileSample("stepMs", performance.now() - stepStart);
+}
+
 window.__arenaCarDebug = {
   getPerf() {
     return {
@@ -3133,6 +3616,46 @@ window.__arenaCarDebug = {
       textures: renderer.info.memory.textures,
       bodies: physics.bodies.length,
       contacts: physics.contacts.length,
+    };
+  },
+  getDetailedPerf() {
+    return summarizeDetailedProfile();
+  },
+  resetDetailedPerf() {
+    resetDetailedProfile(true);
+  },
+  forcePlaying() {
+    gameState.phase = "playing";
+    gameState.countdownRemaining = 0;
+    gameState.countdownText = "";
+    setUiPhase("playing");
+    countdownEl.classList.add("hidden");
+  },
+  runHeadlessBenchmark({ steps = 3600, scriptedPlayer = true } = {}) {
+    resetDetailedProfile(true);
+    const startedAt = performance.now();
+    for (let i = 0; i < steps; i += 1) {
+      runProfiledPlayingStep({ scriptedPlayer, stepIndex: i });
+    }
+    const wallMs = performance.now() - startedAt;
+    return {
+      wallMs,
+      simulatedSeconds: steps * fixedStep,
+      realtimeMultiplier: (steps * fixedStep * 1000) / Math.max(0.001, wallMs),
+      profile: summarizeDetailedProfile(),
+    };
+  },
+  runBareHeadlessBenchmark({ steps = 3600, scriptedPlayer = true } = {}) {
+    resetDetailedProfile(false);
+    const startedAt = performance.now();
+    for (let i = 0; i < steps; i += 1) {
+      runUnprofiledPlayingStep({ scriptedPlayer, stepIndex: i });
+    }
+    const wallMs = performance.now() - startedAt;
+    return {
+      wallMs,
+      simulatedSeconds: steps * fixedStep,
+      realtimeMultiplier: (steps * fixedStep * 1000) / Math.max(0.001, wallMs),
     };
   },
   getState() {
@@ -3240,42 +3763,33 @@ function animate(time) {
   const dt = Math.min(0.05, (time - lastTime) / 1000);
   lastTime = time;
   accumulator = Math.min(accumulator + dt, fixedStep * maxPhysicsStepsPerFrame);
+  detailedProfile.frames += 1;
 
   const simStart = performance.now();
   let stepsThisFrame = 0;
   while (accumulator >= fixedStep && stepsThisFrame < maxPhysicsStepsPerFrame) {
     stepsThisFrame += 1;
-    if (gameState.phase === "countdown") {
-      for (const car of gameState.cars) clearVehicleInputs(car);
-      updateCountdown(fixedStep);
-    } else if (gameState.phase === "playing") {
-      updatePlayerInput();
-      for (const car of gameState.aiCars) {
-        updateAiCar(car, fixedStep, aiUpdateContext);
-      }
-      for (const car of gameState.cars) {
-        driveCar(car);
-        applyAirControls(car);
-        applyBoost(car, fixedStep);
-      }
-      physics.step(fixedStep);
-      processPhysicsContacts();
-      for (const car of gameState.cars) applyQueuedJump(car);
-      for (const car of gameState.cars) updateManualRighting(car, fixedStep);
-      updateRound(fixedStep);
-    } else {
-      clearVehicleInputs(playerCar);
-      input.jumpQueued = false;
-      input.boostQueued = false;
-    }
+    runProfiledPlayingStep();
     accumulator -= fixedStep;
   }
+  if (accumulator >= fixedStep) detailedProfile.cappedFrames += 1;
   const simMs = performance.now() - simStart;
+  recordProfileSample("simMs", simMs);
 
+  let previousPhase = setProfilePhase("syncVisuals");
+  let bucketStart = performance.now();
   syncVisuals(dt, accumulator / fixedStep);
+  recordProfileBucket("syncVisuals", performance.now() - bucketStart);
+  profilePhase = previousPhase;
+
   const renderStart = performance.now();
+  previousPhase = setProfilePhase("render");
   renderer.render(scene, camera);
   const renderMs = performance.now() - renderStart;
+  recordProfileBucket("render", renderMs);
+  recordProfileSample("renderMs", renderMs);
+  profilePhase = previousPhase;
+  recordProfileSample("frameMs", performance.now() - frameStart);
   recordPerfSample(performance.now() - frameStart, simMs, renderMs, stepsThisFrame);
 }
 
