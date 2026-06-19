@@ -67,6 +67,7 @@ const tmpVec3D = new THREE.Vector3();
 const tmpMatrix = new THREE.Matrix4();
 const tmpQuat = new THREE.Quaternion();
 const tmpQuatB = new THREE.Quaternion();
+const carBodyVisualMatrix = new THREE.Matrix4();
 const wheelMatrix = new THREE.Matrix4();
 const wheelVisualPosition = new THREE.Vector3();
 const wheelVisualQuaternion = new THREE.Quaternion();
@@ -282,6 +283,10 @@ const {
 const arenaWallSegments = 24;
 const arenaWallRings = 6;
 const arenaWallColliderThickness = 4.5;
+const arenaFeatureGridCellSize = 12;
+const arenaFeatureGridMin = -worldSpec.outerRadius;
+const arenaFeatureGridCells = Math.ceil((worldSpec.outerRadius * 2) / arenaFeatureGridCellSize);
+const arenaWallSegmentAngle = (Math.PI * 2) / arenaWallSegments;
 
 function setArenaWallGridPoint(target, normalTarget, theta, phi) {
   const c = Math.cos(phi);
@@ -360,12 +365,61 @@ function makeArenaWallPanelEdgeGeometry() {
   return geometry;
 }
 
+const arenaGuideRibCount = 24;
+
+function makeArenaSurfaceGuideGeometry({ y, radiusFractions, ribCount = arenaGuideRibCount, segments = arenaWallSegments }) {
+  const positions = [];
+  for (const fraction of radiusFractions) {
+    const radius = worldSpec.floorRadius * fraction;
+    for (let i = 0; i < segments; i += 1) {
+      const a = (i / segments) * Math.PI * 2;
+      const b = ((i + 1) / segments) * Math.PI * 2;
+      positions.push(
+        Math.cos(a) * radius, y, Math.sin(a) * radius,
+        Math.cos(b) * radius, y, Math.sin(b) * radius,
+      );
+    }
+  }
+
+  for (let i = 0; i < ribCount; i += 1) {
+    const phi = (i / ribCount) * Math.PI * 2;
+    positions.push(
+      Math.cos(phi) * 7.5, y, Math.sin(phi) * 7.5,
+      Math.cos(phi) * worldSpec.floorRadius, y, Math.sin(phi) * worldSpec.floorRadius,
+    );
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function makeArenaSurfaceAccentGeometry({ y, radiusFractions, segments = arenaWallSegments }) {
+  const positions = [];
+  for (const fraction of radiusFractions) {
+    const radius = worldSpec.floorRadius * fraction;
+    for (let i = 0; i < segments; i += 1) {
+      const a = (i / segments) * Math.PI * 2;
+      const b = ((i + 1) / segments) * Math.PI * 2;
+      positions.push(
+        Math.cos(a) * radius, y, Math.sin(a) * radius,
+        Math.cos(b) * radius, y, Math.sin(b) * radius,
+      );
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
 function addArenaSurfaceTriangle(triangles, a, b, c) {
   const normal = new THREE.Vector3()
     .subVectors(b, a)
     .cross(new THREE.Vector3().subVectors(c, a))
     .normalize();
-  triangles.push({
+  const triangle = {
     a: a.clone(),
     b: b.clone(),
     c: c.clone(),
@@ -376,7 +430,10 @@ function addArenaSurfaceTriangle(triangles, a, b, c) {
     maxY: Math.max(a.y, b.y, c.y),
     minZ: Math.min(a.z, b.z, c.z),
     maxZ: Math.max(a.z, b.z, c.z),
-  });
+    queryStamp: 0,
+  };
+  triangles.push(triangle);
+  return triangle;
 }
 
 function addArenaSurfaceGeometry(triangles, geometry, matrix) {
@@ -407,10 +464,43 @@ function addArenaSurfaceGeometry(triangles, geometry, matrix) {
   }
 }
 
+function clampArenaFeatureGridIndex(value) {
+  return THREE.MathUtils.clamp(
+    Math.floor((value - arenaFeatureGridMin) / arenaFeatureGridCellSize),
+    0,
+    arenaFeatureGridCells - 1,
+  );
+}
+
+function makeArenaFeatureGrid(triangles) {
+  const cells = Array.from({ length: arenaFeatureGridCells * arenaFeatureGridCells }, () => []);
+  for (const triangle of triangles) {
+    const minX = clampArenaFeatureGridIndex(triangle.minX);
+    const maxX = clampArenaFeatureGridIndex(triangle.maxX);
+    const minZ = clampArenaFeatureGridIndex(triangle.minZ);
+    const maxZ = clampArenaFeatureGridIndex(triangle.maxZ);
+    for (let z = minZ; z <= maxZ; z += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        cells[z * arenaFeatureGridCells + x].push(triangle);
+      }
+    }
+  }
+  return { cells };
+}
+
+function makeArenaWallCells() {
+  return Array.from({ length: arenaWallRings }, () => (
+    Array.from({ length: arenaWallSegments }, () => [])
+  ));
+}
+
 function makeArenaSurface(definition) {
   const surface = {
     wallTriangles: [],
     featureTriangles: [],
+    wallCells: makeArenaWallCells(),
+    featureGrid: null,
+    queryStamp: 0,
   };
 
   for (let j = 0; j < arenaWallRings; j += 1) {
@@ -427,8 +517,8 @@ function makeArenaSurface(definition) {
       setArenaWallGridPoint(p01, tmpVec3A, theta0, phi1);
       setArenaWallGridPoint(p10, tmpVec3A, theta1, phi0);
       setArenaWallGridPoint(p11, tmpVec3A, theta1, phi1);
-      addArenaSurfaceTriangle(surface.wallTriangles, p00, p01, p10);
-      addArenaSurfaceTriangle(surface.wallTriangles, p01, p11, p10);
+      surface.wallCells[j][i].push(addArenaSurfaceTriangle(surface.wallTriangles, p00, p01, p10));
+      surface.wallCells[j][i].push(addArenaSurfaceTriangle(surface.wallTriangles, p01, p11, p10));
     }
   }
 
@@ -447,6 +537,8 @@ function makeArenaSurface(definition) {
     addArenaSurfaceGeometry(surface.featureTriangles, geometry, tmpMatrix);
     geometry.dispose();
   }
+
+  surface.featureGrid = makeArenaFeatureGrid(surface.featureTriangles);
 
   return surface;
 }
@@ -493,6 +585,94 @@ function raySegmentTriangleT(from, dir, tri, bounds) {
 
   const t = (edge2x * qvecX + edge2y * qvecY + edge2z * qvecZ) * invDet;
   return t >= -1e-5 && t <= 1 + 1e-5 ? THREE.MathUtils.clamp(t, 0, 1) : null;
+}
+
+function forEachFeatureCandidate(surface, bounds, visit) {
+  const grid = surface.featureGrid;
+  if (!grid) {
+    for (const triangle of surface.featureTriangles) visit(triangle);
+    return;
+  }
+
+  surface.queryStamp += 1;
+  const stamp = surface.queryStamp;
+  const minX = clampArenaFeatureGridIndex(bounds.minX);
+  const maxX = clampArenaFeatureGridIndex(bounds.maxX);
+  const minZ = clampArenaFeatureGridIndex(bounds.minZ);
+  const maxZ = clampArenaFeatureGridIndex(bounds.maxZ);
+  for (let z = minZ; z <= maxZ; z += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const cell = grid.cells[z * arenaFeatureGridCells + x];
+      for (const triangle of cell) {
+        if (triangle.queryStamp === stamp) continue;
+        triangle.queryStamp = stamp;
+        visit(triangle);
+      }
+    }
+  }
+}
+
+function normalizeArenaAngle(angle) {
+  let normalized = angle % (Math.PI * 2);
+  if (normalized < 0) normalized += Math.PI * 2;
+  return normalized;
+}
+
+function signedArenaAngleDelta(from, to) {
+  return Math.atan2(Math.sin(to - from), Math.cos(to - from));
+}
+
+function wallRingIndexFromY(y, roundFn) {
+  const theta = Math.acos(THREE.MathUtils.clamp(1 - y / worldSpec.curveRadius, -1, 1));
+  return THREE.MathUtils.clamp(roundFn((theta / Math.PI) * arenaWallRings), 0, arenaWallRings - 1);
+}
+
+function forEachWallCandidate(surface, from, to, bounds, segmentLength, visit) {
+  const minY = Math.max(0, bounds.minY - 0.25);
+  const maxY = Math.min(worldSpec.ceilingY, bounds.maxY + 0.25);
+  if (maxY < 0 || minY > worldSpec.ceilingY) return;
+
+  const minRing = Math.max(0, wallRingIndexFromY(minY, Math.floor) - 1);
+  const maxRing = Math.min(arenaWallRings - 1, wallRingIndexFromY(maxY, Math.ceil) + 1);
+  const fromRadius = Math.hypot(from.x, from.z);
+  const toRadius = Math.hypot(to.x, to.z);
+  const minRadius = Math.min(fromRadius, toRadius);
+
+  surface.queryStamp += 1;
+  const stamp = surface.queryStamp;
+  const visitCell = (ring, segment) => {
+    const cell = surface.wallCells[ring][segment];
+    for (const triangle of cell) {
+      if (triangle.queryStamp === stamp) continue;
+      triangle.queryStamp = stamp;
+      visit(triangle);
+    }
+  };
+
+  if (minRadius < worldSpec.floorRadius * 0.35) {
+    for (let ring = minRing; ring <= maxRing; ring += 1) {
+      for (let segment = 0; segment < arenaWallSegments; segment += 1) visitCell(ring, segment);
+    }
+    return;
+  }
+
+  const fromAngle = Math.atan2(from.z, from.x);
+  const toAngle = Math.atan2(to.z, to.x);
+  const delta = signedArenaAngleDelta(fromAngle, toAngle);
+  const center = normalizeArenaAngle(fromAngle + delta * 0.5);
+  const angularPadding = Math.min(
+    Math.PI,
+    Math.abs(delta) * 0.5 + segmentLength / Math.max(minRadius, 1) + arenaWallSegmentAngle * 1.5,
+  );
+  const centerSegment = Math.floor(center / arenaWallSegmentAngle);
+  const segmentRadius = Math.ceil(angularPadding / arenaWallSegmentAngle);
+
+  for (let ring = minRing; ring <= maxRing; ring += 1) {
+    for (let offset = -segmentRadius; offset <= segmentRadius; offset += 1) {
+      const segment = (centerSegment + offset + arenaWallSegments * 4) % arenaWallSegments;
+      visitCell(ring, segment);
+    }
+  }
 }
 
 function raycastArenaSurface(from, to, hit = arenaSurfaceRayHit) {
@@ -542,17 +722,17 @@ function raycastArenaSurface(from, to, hit = arenaSurfaceRayHit) {
       }
     }
 
-    for (const tri of surface.featureTriangles) {
+    forEachFeatureCandidate(surface, arenaRayBounds, (tri) => {
       const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
       if (t !== null) recordHit(t, tri.normal);
-    }
+    });
 
     const maxRadius = Math.max(Math.hypot(tmpVec3A.x, tmpVec3A.z), Math.hypot(tmpVec3B.x, tmpVec3B.z));
     if (maxRadius >= worldSpec.floorRadius - segmentLength - 0.5) {
-      for (const tri of surface.wallTriangles) {
+      forEachWallCandidate(surface, tmpVec3A, tmpVec3B, arenaRayBounds, segmentLength, (tri) => {
         const t = raySegmentTriangleT(tmpVec3A, tmpVec3C, tri, arenaRayBounds);
         if (t !== null) recordHit(t, tri.normal);
-      }
+      });
     }
 
     return hit;
@@ -969,7 +1149,7 @@ function getSharedCarMaterials() {
       bodyGlowMaterial: new THREE.LineBasicMaterial({
         color: 0xff6a24,
         transparent: true,
-        opacity: 0.48,
+        opacity: 0.08,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       }),
@@ -1057,24 +1237,50 @@ function makeArenaObstacleGeometry(obstacle) {
   return makeMoundGeometry(obstacle.width, obstacle.length, obstacle.height, obstacle.topScale);
 }
 
-function makeArenaObstacleEdgeGeometry(obstacle, geometry) {
-  return new THREE.EdgesGeometry(geometry);
-}
-
-function offsetArenaObstacleEdgeGeometry(geometry, amount = 0.035) {
-  const position = geometry.getAttribute("position");
-  for (let i = 0; i < position.count; i += 1) {
-    const x = position.getX(i);
-    const y = position.getY(i);
-    const z = position.getZ(i);
-    const flatLength = Math.hypot(x, z);
-    const outwardX = flatLength > 0.0001 ? x / flatLength : 0;
-    const outwardZ = flatLength > 0.0001 ? z / flatLength : 0;
-    position.setXYZ(i, x + outwardX * amount, y + amount, z + outwardZ * amount);
+function makePolyhedronEdgeGeometry(source, edgePairs) {
+  const sourcePosition = source.getAttribute("position");
+  const positions = [];
+  for (const [a, b] of edgePairs) {
+    positions.push(
+      sourcePosition.getX(a), sourcePosition.getY(a), sourcePosition.getZ(a),
+      sourcePosition.getX(b), sourcePosition.getY(b), sourcePosition.getZ(b),
+    );
   }
-  position.needsUpdate = true;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   geometry.computeBoundingSphere();
   return geometry;
+}
+
+function makeArenaObstacleEdgeGeometry(obstacle, geometry) {
+  if (obstacle.type === "peak") {
+    return makePolyhedronEdgeGeometry(geometry, [
+      [0, 1], [1, 3], [3, 2], [2, 0],
+      [0, 4], [1, 4], [3, 4], [2, 4],
+    ]);
+  }
+
+  if (obstacle.type === "wedge") {
+    return makePolyhedronEdgeGeometry(geometry, [
+      [0, 1], [1, 3], [3, 2], [2, 0],
+      [0, 4], [4, 5], [5, 1],
+      [2, 4], [3, 5],
+    ]);
+  }
+
+  if (obstacle.type === "ridge") {
+    return makePolyhedronEdgeGeometry(geometry, [
+      [0, 1], [1, 3], [3, 2], [2, 0],
+      [4, 5],
+      [0, 4], [1, 4], [2, 5], [3, 5],
+    ]);
+  }
+
+  return makePolyhedronEdgeGeometry(geometry, [
+    [0, 1], [1, 3], [3, 2], [2, 0],
+    [4, 5], [5, 7], [7, 6], [6, 4],
+    [0, 4], [1, 5], [3, 7], [2, 6],
+  ]);
 }
 
 function makeConvexShapeFromFlatVertices(flatVertices, faces) {
@@ -1230,55 +1436,6 @@ function makeArenaObstacleShape(obstacle) {
   if (obstacle.type === "wedge") return makeWedgeShape(obstacle.width, obstacle.length, obstacle.height, obstacle.topScale);
   if (obstacle.type === "ridge") return makeRidgeShape(obstacle.width, obstacle.length, obstacle.height, obstacle.topScale);
   return makeMoundShape(obstacle.width, obstacle.length, obstacle.height, obstacle.topScale);
-}
-
-const arenaGuideRibCount = 24;
-
-function makeArenaSurfaceGuideGeometry({ y, radiusFractions, ribCount = arenaGuideRibCount, segments = arenaWallSegments }) {
-  const positions = [];
-  for (const fraction of radiusFractions) {
-    const radius = worldSpec.floorRadius * fraction;
-    for (let i = 0; i < segments; i += 1) {
-      const a = (i / segments) * Math.PI * 2;
-      const b = ((i + 1) / segments) * Math.PI * 2;
-      positions.push(
-        Math.cos(a) * radius, y, Math.sin(a) * radius,
-        Math.cos(b) * radius, y, Math.sin(b) * radius,
-      );
-    }
-  }
-
-  for (let i = 0; i < ribCount; i += 1) {
-    const phi = (i / ribCount) * Math.PI * 2;
-    positions.push(
-      Math.cos(phi) * 7.5, y, Math.sin(phi) * 7.5,
-      Math.cos(phi) * worldSpec.floorRadius, y, Math.sin(phi) * worldSpec.floorRadius,
-    );
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.computeBoundingSphere();
-  return geometry;
-}
-
-function makeArenaSurfaceAccentGeometry({ y, radiusFractions, segments = arenaWallSegments }) {
-  const positions = [];
-  for (const fraction of radiusFractions) {
-    const radius = worldSpec.floorRadius * fraction;
-    for (let i = 0; i < segments; i += 1) {
-      const a = (i / segments) * Math.PI * 2;
-      const b = ((i + 1) / segments) * Math.PI * 2;
-      positions.push(
-        Math.cos(a) * radius, y, Math.sin(a) * radius,
-        Math.cos(b) * radius, y, Math.sin(b) * radius,
-      );
-    }
-  }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.computeBoundingSphere();
-  return geometry;
 }
 
 function addArenaPhysics(runtime, materials, definition) {
@@ -1458,15 +1615,23 @@ function disposeArenaMaterials(materials) {
 }
 
 function disposeObjectTree(object) {
+  const disposedGeometries = new Set();
   object.traverse((child) => {
-    if (child.geometry) child.geometry.dispose();
+    if (child.geometry && !disposedGeometries.has(child.geometry)) {
+      child.geometry.dispose();
+      disposedGeometries.add(child.geometry);
+    }
   });
 }
 
 function disposeOwnedObjectTree(object) {
   const ownedMaterials = new Set();
+  const disposedGeometries = new Set();
   object.traverse((child) => {
-    if (child.geometry) child.geometry.dispose();
+    if (child.geometry && !disposedGeometries.has(child.geometry)) {
+      child.geometry.dispose();
+      disposedGeometries.add(child.geometry);
+    }
     for (const material of child.userData?.ownedMaterials ?? []) ownedMaterials.add(material);
     const material = child.material;
     if (Array.isArray(material)) {
@@ -1485,54 +1650,6 @@ addStarSkybox();
 
 let activeArenaRuntime = null;
 let arenaLights = null;
-
-function addArenaSurfaceGuides(y, normalSign, runtime, materials) {
-  const group = new THREE.Group();
-  group.add(
-    new THREE.LineSegments(
-      makeArenaSurfaceGuideGeometry({
-        y,
-        radiusFractions: [0.12, 0.25, 0.38, 0.5, 0.62, 0.75, 0.88, 1],
-      }),
-      materials.floorLineMaterial,
-    ),
-  );
-  group.add(
-    new THREE.LineSegments(
-      makeArenaSurfaceGuideGeometry({
-        y: y + normalSign * 0.012,
-        radiusFractions: [0.25, 0.5, 0.75, 1],
-      }),
-      materials.floorGlowMaterial,
-    ),
-  );
-  group.add(
-    new THREE.LineSegments(
-      makeArenaSurfaceAccentGeometry({
-        y: y + normalSign * 0.018,
-        radiusFractions: [0.16, 0.34, 0.68],
-      }),
-      materials.floorAccentMaterial,
-    ),
-  );
-  runtime.group.add(group);
-}
-
-function addLaunchMound({ type = "mound", position, yaw, width, length, height, topScale = 0.36, gap = 0, endScale = 0.68 }, runtime, materials) {
-  const obstacle = { type, width, length, height, topScale, gap, endScale };
-  const geometry = makeArenaObstacleGeometry(obstacle);
-  const mesh = new THREE.Mesh(geometry, [materials.rampTopMaterial, materials.rampSideMaterial]);
-  mesh.position.copy(position);
-  mesh.rotation.y = yaw;
-  mesh.castShadow = false;
-  mesh.receiveShadow = true;
-  runtime.group.add(mesh);
-
-  const edgeLines = new THREE.LineSegments(makeArenaObstacleEdgeGeometry(obstacle, geometry), materials.rampEdgeMaterial);
-  edgeLines.position.copy(position);
-  edgeLines.rotation.y = yaw;
-  runtime.group.add(edgeLines);
-}
 
 function extractGeometryMaterialGroup(source, materialIndex) {
   const index = source.getIndex();
@@ -1578,6 +1695,19 @@ function extractGeometryMaterialGroup(source, materialIndex) {
   return geometry;
 }
 
+function mergeStaticGeometries(geometries) {
+  if (geometries.length === 0) return null;
+  const geometry = geometries.length === 1 ? geometries[0] : mergeGeometries(geometries, false);
+  if (!geometry) {
+    for (const entry of geometries) entry.dispose();
+    return null;
+  }
+  for (const entry of geometries) {
+    if (entry !== geometry) entry.dispose();
+  }
+  return geometry;
+}
+
 function clearArenaRuntime() {
   if (!activeArenaRuntime) return;
   for (const body of activeArenaRuntime.physicsBodies) physics.removeBody(body);
@@ -1587,10 +1717,52 @@ function clearArenaRuntime() {
   activeArenaRuntime = null;
 }
 
+function addMergedLineSegments(geometries, material, runtime) {
+  const geometry = mergeStaticGeometries(geometries);
+  if (!geometry) return;
+  runtime.group.add(new THREE.LineSegments(geometry, material));
+}
+
+function addArenaSurfaceGuides(runtime, materials) {
+  const floorY = 0.045;
+  const ceilingY = worldSpec.ceilingY - 0.045;
+  addMergedLineSegments([
+    makeArenaSurfaceGuideGeometry({
+      y: floorY,
+      radiusFractions: [0.12, 0.25, 0.38, 0.5, 0.62, 0.75, 0.88, 1],
+    }),
+    makeArenaSurfaceGuideGeometry({
+      y: ceilingY,
+      radiusFractions: [0.12, 0.25, 0.38, 0.5, 0.62, 0.75, 0.88, 1],
+    }),
+  ], materials.floorLineMaterial, runtime);
+  addMergedLineSegments([
+    makeArenaSurfaceGuideGeometry({
+      y: floorY + 0.012,
+      radiusFractions: [0.25, 0.5, 0.75, 1],
+    }),
+    makeArenaSurfaceGuideGeometry({
+      y: ceilingY - 0.012,
+      radiusFractions: [0.25, 0.5, 0.75, 1],
+    }),
+  ], materials.floorGlowMaterial, runtime);
+  addMergedLineSegments([
+    makeArenaSurfaceAccentGeometry({
+      y: floorY + 0.018,
+      radiusFractions: [0.16, 0.34, 0.68],
+    }),
+    makeArenaSurfaceAccentGeometry({
+      y: ceilingY - 0.018,
+      radiusFractions: [0.16, 0.34, 0.68],
+    }),
+  ], materials.floorAccentMaterial, runtime);
+}
+
 function addArenaLayout(definition, runtime, materials) {
   const moundY = 0;
   const topGeometries = [];
   const sideGeometries = [];
+  const edgeGeometries = [];
   const matrix = new THREE.Matrix4();
   const quaternion = new THREE.Quaternion();
   const position = new THREE.Vector3();
@@ -1622,19 +1794,16 @@ function addArenaLayout(definition, runtime, materials) {
       sideGeometries.push(sideGeometry);
     }
 
-    const edgeGeometry = offsetArenaObstacleEdgeGeometry(makeArenaObstacleEdgeGeometry(obstacle, geometry));
+    const edgeGeometry = makeArenaObstacleEdgeGeometry(obstacle, geometry);
     edgeGeometry.applyMatrix4(matrix);
-    const edgeLines = new THREE.LineSegments(edgeGeometry, materials.rampEdgeMaterial);
-    edgeLines.renderOrder = 1;
-    runtime.group.add(edgeLines);
+    edgeGeometries.push(edgeGeometry);
     geometry.dispose();
   }
 
+  addMergedLineSegments(edgeGeometries, materials.rampEdgeMaterial, runtime);
+
   if (topGeometries.length > 0) {
-    const geometry = mergeGeometries(topGeometries, false);
-    for (const entry of topGeometries) {
-      if (entry !== geometry) entry.dispose();
-    }
+    const geometry = mergeStaticGeometries(topGeometries);
     if (geometry) {
       const mesh = new THREE.Mesh(geometry, materials.rampTopMaterial);
       mesh.castShadow = false;
@@ -1644,10 +1813,7 @@ function addArenaLayout(definition, runtime, materials) {
   }
 
   if (sideGeometries.length > 0) {
-    const geometry = mergeGeometries(sideGeometries, false);
-    for (const entry of sideGeometries) {
-      if (entry !== geometry) entry.dispose();
-    }
+    const geometry = mergeStaticGeometries(sideGeometries);
     if (geometry) {
       const mesh = new THREE.Mesh(geometry, materials.rampSideMaterial);
       mesh.castShadow = false;
@@ -1696,8 +1862,7 @@ function loadArena(id = "orange") {
   activeArenaRuntime = runtime;
 
   addArenaPhysics(runtime, materials, definition);
-  addArenaSurfaceGuides(0.045, 1, runtime, materials);
-  addArenaSurfaceGuides(worldSpec.ceilingY - 0.045, -1, runtime, materials);
+  addArenaSurfaceGuides(runtime, materials);
   addArenaLayout(definition, runtime, materials);
 
   if (arenaLights) {
@@ -1707,10 +1872,10 @@ function loadArena(id = "orange") {
 }
 
 function addLights() {
-  scene.add(new THREE.HemisphereLight(0xffd9aa, 0x6a3f28, 3.0));
-  scene.add(new THREE.AmbientLight(0x9a7c58, 0.48));
+  scene.add(new THREE.HemisphereLight(0xf0f3ff, 0x1a1720, 2.55));
+  scene.add(new THREE.AmbientLight(0xb8bac8, 0.5));
 
-  const key = new THREE.DirectionalLight(0xffd5a1, 2.85);
+  const key = new THREE.DirectionalLight(0xf5f7ff, 2.65);
   key.position.set(-55, 92, 46);
   key.castShadow = true;
   key.shadow.mapSize.set(512, 512);
@@ -1735,52 +1900,177 @@ function addLights() {
 arenaLights = addLights();
 loadArena("orange");
 
+let carBodyVisualResources = null;
+let globalCarBodyVisuals = null;
+const maxCarBodyVisualCars = 8;
+const freeCarBodyVisualSlots = [];
+let nextCarBodyVisualSlot = 0;
+
+function makeTransformedGeometry(geometry, position, rotationZ = 0) {
+  carBodyVisualMatrix.compose(
+    position,
+    tmpQuat.setFromAxisAngle(tmpVec3D.set(0, 0, 1), rotationZ),
+    tmpVec3A.set(1, 1, 1),
+  );
+  geometry.applyMatrix4(carBodyVisualMatrix);
+  return geometry;
+}
+
+function makeBoxFeatureGeometry(width, height, length, x, y, z, rotationZ = 0) {
+  return makeTransformedGeometry(
+    new THREE.BoxGeometry(width, height, length),
+    tmpVec3B.set(x, y + chassisBodyLift, z),
+    rotationZ,
+  );
+}
+
+function mergeCarPartGeometries(geometries) {
+  const geometry = mergeStaticGeometries(geometries);
+  if (geometry) geometry.computeBoundingSphere();
+  return geometry;
+}
+
+function getCarBodyVisualResources() {
+  if (!carBodyVisualResources) {
+    const {
+      trimMaterial,
+      exhaustMaterial,
+      exhaustGlowMaterial,
+      glassMaterial,
+    } = getSharedCarMaterials();
+    const trimGeometry = mergeCarPartGeometries([
+      makeBoxFeatureGeometry(0.08, 0.06, 2.42, -1.13, -0.42, -0.08, sideSkidAngle),
+      makeBoxFeatureGeometry(0.08, 0.06, 2.42, 1.13, -0.42, -0.08, -sideSkidAngle),
+      makeBoxFeatureGeometry(1.34, 0.04, 0.06, 0, -0.3, 1.34),
+      makeBoxFeatureGeometry(1.24, 0.04, 0.06, 0, -0.26, -1.42),
+    ]);
+    const pipeGeometry = new THREE.CylinderGeometry(0.105, 0.12, 0.18, 10).rotateX(Math.PI / 2);
+    const pipeCoreGeometry = new THREE.CylinderGeometry(0.055, 0.065, 0.192, 8).rotateX(Math.PI / 2);
+    const exhaustGeometry = mergeCarPartGeometries([
+      makeBoxFeatureGeometry(0.92, 0.2, 0.16, 0, -0.08, -1.63),
+      makeTransformedGeometry(pipeGeometry.clone(), tmpVec3B.set(-0.24, -0.06 + chassisBodyLift, -1.73)),
+      makeTransformedGeometry(pipeGeometry.clone(), tmpVec3B.set(0.24, -0.06 + chassisBodyLift, -1.73)),
+    ]);
+    const exhaustGlowGeometry = mergeCarPartGeometries([
+      makeTransformedGeometry(pipeCoreGeometry.clone(), tmpVec3B.set(-0.24, -0.06 + chassisBodyLift, -1.742)),
+      makeTransformedGeometry(pipeCoreGeometry.clone(), tmpVec3B.set(0.24, -0.06 + chassisBodyLift, -1.742)),
+    ]);
+    pipeGeometry.dispose();
+    pipeCoreGeometry.dispose();
+
+    carBodyVisualResources = {
+      canopyGeometry: makeStuntCarCanopyGeometry(),
+      trimGeometry,
+      exhaustGeometry,
+      exhaustGlowGeometry,
+      glassMaterial,
+      trimMaterial,
+      exhaustMaterial,
+      exhaustGlowMaterial,
+    };
+  }
+  return carBodyVisualResources;
+}
+
+function makeCarBodyInstancedMesh(geometry, material, count) {
+  const mesh = new THREE.InstancedMesh(geometry, material, count);
+  mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 2;
+  mesh.castShadow = true;
+  mesh.receiveShadow = false;
+  return mesh;
+}
+
+function getGlobalCarBodyVisuals() {
+  if (globalCarBodyVisuals) return globalCarBodyVisuals;
+
+  const resources = getCarBodyVisualResources();
+  const group = new THREE.Group();
+  const canopy = makeCarBodyInstancedMesh(resources.canopyGeometry, resources.glassMaterial, maxCarBodyVisualCars);
+  const trim = makeCarBodyInstancedMesh(resources.trimGeometry, resources.trimMaterial, maxCarBodyVisualCars);
+  const exhaust = makeCarBodyInstancedMesh(resources.exhaustGeometry, resources.exhaustMaterial, maxCarBodyVisualCars);
+  const exhaustGlow = makeCarBodyInstancedMesh(resources.exhaustGlowGeometry, resources.exhaustGlowMaterial, maxCarBodyVisualCars);
+  exhaust.castShadow = false;
+  exhaustGlow.castShadow = false;
+
+  for (let i = 0; i < maxCarBodyVisualCars; i += 1) {
+    canopy.setMatrixAt(i, hiddenWheelMatrix);
+    trim.setMatrixAt(i, hiddenWheelMatrix);
+    exhaust.setMatrixAt(i, hiddenWheelMatrix);
+    exhaustGlow.setMatrixAt(i, hiddenWheelMatrix);
+  }
+  canopy.instanceMatrix.needsUpdate = true;
+  trim.instanceMatrix.needsUpdate = true;
+  exhaust.instanceMatrix.needsUpdate = true;
+  exhaustGlow.instanceMatrix.needsUpdate = true;
+
+  group.add(canopy, trim, exhaust, exhaustGlow);
+  scene.add(group);
+  globalCarBodyVisuals = { group, canopy, trim, exhaust, exhaustGlow };
+  return globalCarBodyVisuals;
+}
+
+function makeCarBodyVisuals(colorHex) {
+  const visuals = getGlobalCarBodyVisuals();
+  const slot = freeCarBodyVisualSlots.pop() ?? nextCarBodyVisualSlot;
+  if (slot >= maxCarBodyVisualCars) throw new Error(`No car body visual slot available for car ${slot + 1}`);
+  if (slot === nextCarBodyVisualSlot) nextCarBodyVisualSlot += 1;
+  return { slot, ...visuals };
+}
+
+function setCarBodyVisualMatrix(carBodyVisuals, matrix) {
+  if (!carBodyVisuals) return;
+  const { slot, canopy, trim, exhaust, exhaustGlow } = carBodyVisuals;
+  canopy.setMatrixAt(slot, matrix);
+  trim.setMatrixAt(slot, matrix);
+  exhaust.setMatrixAt(slot, matrix);
+  exhaustGlow.setMatrixAt(slot, matrix);
+}
+
+function hideCarBodyVisuals(carBodyVisuals) {
+  setCarBodyVisualMatrix(carBodyVisuals, hiddenWheelMatrix);
+  if (!carBodyVisuals) return;
+  carBodyVisuals.canopy.instanceMatrix.needsUpdate = true;
+  carBodyVisuals.trim.instanceMatrix.needsUpdate = true;
+  carBodyVisuals.exhaust.instanceMatrix.needsUpdate = true;
+  carBodyVisuals.exhaustGlow.instanceMatrix.needsUpdate = true;
+}
+
+function releaseCarBodyVisuals(carBodyVisuals) {
+  if (!carBodyVisuals) return;
+  hideCarBodyVisuals(carBodyVisuals);
+  freeCarBodyVisualSlots.push(carBodyVisuals.slot);
+}
+
+function markGlobalCarBodyVisualsDirty() {
+  if (!globalCarBodyVisuals) return;
+  globalCarBodyVisuals.canopy.instanceMatrix.needsUpdate = true;
+  globalCarBodyVisuals.trim.instanceMatrix.needsUpdate = true;
+  globalCarBodyVisuals.exhaust.instanceMatrix.needsUpdate = true;
+  globalCarBodyVisuals.exhaustGlow.instanceMatrix.needsUpdate = true;
+}
+
 function makeCarBodyVisual(color = 0xff512f) {
   const group = new THREE.Group();
   const {
-    darkMaterial,
-    trimMaterial,
-    exhaustMaterial,
-    exhaustGlowMaterial,
-    glassMaterial,
     bodyEdgeMaterial,
     bodyGlowMaterial,
     warmEdgeMaterial,
   } = getSharedCarMaterials();
   const bodyMaterial = new THREE.MeshStandardMaterial({
     color,
-    roughness: 0.68,
-    metalness: 0.08,
+    roughness: 0.9,
+    metalness: 0,
     flatShading: true,
   });
   bodyMaterial.userData.disposeWithOwner = true;
 
-  function addBoxFeature(width, height, length, x, y, z, material, castShadow = true, rotationZ = 0) {
-    const feature = new THREE.Mesh(new THREE.BoxGeometry(width, height, length), material);
-    feature.position.set(x, y + chassisBodyLift, z);
-    feature.rotation.z = rotationZ;
-    feature.castShadow = castShadow;
-    feature.receiveShadow = false;
-    group.add(feature);
-    return feature;
-  }
-
-  function addBodyMesh(geometry, material) {
-    const mesh = new THREE.Mesh(geometry, material);
-    mesh.castShadow = true;
-    mesh.receiveShadow = false;
-    group.add(mesh);
-    return mesh;
-  }
-
-  const bodyGeometry = makeStuntCarBodyGeometry();
-  const canopyGeometry = makeStuntCarCanopyGeometry();
-  const body = addBodyMesh(bodyGeometry, bodyMaterial);
+  const body = new THREE.Mesh(makeStuntCarBodyGeometry(), bodyMaterial);
   body.castShadow = true;
-
-  const canopy = addBodyMesh(canopyGeometry, glassMaterial);
-  canopy.castShadow = true;
-
+  body.receiveShadow = false;
+  group.add(body);
+  const canopyGeometry = makeStuntCarCanopyGeometry();
   const bodyEdges = makeStuntCarBodyEdgeGeometry();
   const bodyEdgeLines = new THREE.LineSegments(bodyEdges, bodyEdgeMaterial);
   bodyEdgeLines.renderOrder = 1;
@@ -1791,29 +2081,11 @@ function makeCarBodyVisual(color = 0xff512f) {
   const canopyEdgeLines = new THREE.LineSegments(new THREE.EdgesGeometry(canopyGeometry, 24), warmEdgeMaterial);
   canopyEdgeLines.renderOrder = 2;
   group.add(canopyEdgeLines);
+  canopyGeometry.dispose();
 
-  addBoxFeature(0.08, 0.06, 2.42, -1.13, -0.42, -0.08, trimMaterial, false, sideSkidAngle);
-  addBoxFeature(0.08, 0.06, 2.42, 1.13, -0.42, -0.08, trimMaterial, false, -sideSkidAngle);
-  addBoxFeature(1.34, 0.04, 0.06, 0, -0.3, 1.34, trimMaterial, false);
-  addBoxFeature(1.24, 0.04, 0.06, 0, -0.26, -1.42, trimMaterial, false);
-  addBoxFeature(0.92, 0.2, 0.16, 0, -0.08, -1.63, exhaustMaterial, false);
-
-  const pipeGeometry = new THREE.CylinderGeometry(0.105, 0.12, 0.18, 10).rotateX(Math.PI / 2);
-  const pipeCoreGeometry = new THREE.CylinderGeometry(0.055, 0.065, 0.192, 8).rotateX(Math.PI / 2);
-  for (const x of [-0.24, 0.24]) {
-    const pipe = new THREE.Mesh(pipeGeometry, exhaustMaterial);
-    pipe.position.set(x, -0.06 + chassisBodyLift, -1.73);
-    pipe.castShadow = false;
-    group.add(pipe);
-    const core = new THREE.Mesh(pipeCoreGeometry, exhaustGlowMaterial);
-    core.position.set(x, -0.06 + chassisBodyLift, -1.742);
-    core.castShadow = false;
-    group.add(core);
-  }
-
+  group.userData.bodyVisuals = makeCarBodyVisuals(color);
   group.userData.bodyMaterial = bodyMaterial;
   group.userData.ownedMaterials = [bodyMaterial];
-  compactStaticMeshGroup(group);
   group.traverse((child) => {
     if (child.isMesh || child.isLineSegments) child.renderOrder = Math.max(child.renderOrder, 2);
   });
@@ -2340,6 +2612,7 @@ function createCar({ id, name, color, isPlayer = false }) {
     body,
     vehicle,
     visual,
+    bodyVisuals: visual.userData.bodyVisuals,
     boostFlame,
     tagMarker,
     wheelVisuals,
@@ -2415,6 +2688,7 @@ function deactivateCar(car) {
   car.visual.visible = false;
   car.boostFlame.visible = false;
   car.tagMarker.visible = false;
+  hideCarBodyVisuals(car.bodyVisuals);
   car.input = makeInputState();
   car.boostTimeRemaining = 0;
   car.boostCooldownRemaining = 0;
@@ -2438,6 +2712,7 @@ function destroyCar(car) {
   scene.remove(car.visual);
   scene.remove(car.tagMarker);
   disposeOwnedObjectTree(car.visual);
+  releaseCarBodyVisuals(car.bodyVisuals);
   releaseWheelVisuals(car.wheelVisuals);
 }
 
@@ -3244,6 +3519,8 @@ function syncCarVisual(car, interpolationAlpha, visualTime) {
     .set(car.body.previousQuaternion.x, car.body.previousQuaternion.y, car.body.previousQuaternion.z, car.body.previousQuaternion.w)
     .slerp(tmpQuatB.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w), interpolationAlpha);
   car.visual.quaternion.copy(tmpQuat);
+  carBodyVisualMatrix.compose(car.visual.position, car.visual.quaternion, car.visual.scale);
+  setCarBodyVisualMatrix(car.bodyVisuals, car.visual.visible ? carBodyVisualMatrix : hiddenWheelMatrix);
 
   savedChassisPosition.copy(car.body.position);
   savedChassisQuaternion.copy(car.body.quaternion);
@@ -3383,6 +3660,7 @@ function syncVisuals(dt, interpolationAlpha) {
     globalWheelVisuals.rims.instanceMatrix.needsUpdate = true;
     globalWheelVisuals.hubs.instanceMatrix.needsUpdate = true;
   }
+  markGlobalCarBodyVisualsDirty();
 
   if (gameState.phase === "countdown") {
     syncCountdownCamera();
