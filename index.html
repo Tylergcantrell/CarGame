@@ -43,11 +43,14 @@
             <label>
               <span>Cars</span>
               <select id="player-count">
+                <option value="1">1</option>
                 <option value="2">2</option>
                 <option value="3">3</option>
                 <option value="4" selected>4</option>
                 <option value="5">5</option>
                 <option value="6">6</option>
+                <option value="7">7</option>
+                <option value="8">8</option>
               </select>
             </label>
             <label>
@@ -97,6 +100,9 @@
         </div>
         <small>jump</small>
       </button>
+    </div>
+    <div class="countdown hidden" id="countdown" aria-live="polite">
+      <span id="countdown-value">3</span>
     </div>
     <div class="touch-controls" aria-hidden="true">
       <div class="joystick" id="joystick">

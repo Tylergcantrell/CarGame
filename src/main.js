@@ -55,9 +55,12 @@ const wheelMatrix = new THREE.Matrix4();
 const wheelVisualPosition = new THREE.Vector3();
 const wheelVisualQuaternion = new THREE.Quaternion();
 const wheelVisualScale = new THREE.Vector3(1, 1, 1);
+const minWheelVisualSurfaceClearance = 0.46;
 const upAxis = new THREE.Vector3(0, 1, 0);
 const airControlTorque = new CANNON.Vec3();
 const worldAirControlTorque = new CANNON.Vec3();
+const recoveryForce = new CANNON.Vec3();
+const recoveryPoint = new CANNON.Vec3();
 const boostForce = new CANNON.Vec3();
 const boostPoint = new CANNON.Vec3();
 const savedChassisPosition = new CANNON.Vec3();
@@ -67,14 +70,32 @@ const cameraObstacles = [];
 const cameraCollisionMeshes = [];
 const cameraRaycaster = new THREE.Raycaster();
 const cameraRayHits = [];
-const cameraCandidates = Array.from({ length: 7 }, () => new THREE.Vector3());
+const cameraCandidates = Array.from({ length: 11 }, () => new THREE.Vector3());
 const cameraLocalPoint = new THREE.Vector3();
 const cameraToCandidate = new THREE.Vector3();
+const cameraPathSample = new THREE.Vector3();
+const cameraSafeDirection = new THREE.Vector3();
+const cameraSafeOffset = new THREE.Vector3();
+const cameraRawForward = new THREE.Vector3();
+const cameraRawUp = new THREE.Vector3();
+const cameraRawRight = new THREE.Vector3();
+const cameraResolvedUp = new THREE.Vector3();
+const countdownCameraStart = new THREE.Vector3();
+const countdownCameraEnd = new THREE.Vector3();
+const countdownCameraTargetStart = new THREE.Vector3();
+const countdownCameraTargetEnd = new THREE.Vector3();
 const arenaContactResult = {
   point: new THREE.Vector3(),
   normal: new THREE.Vector3(),
   distance: 0,
 };
+const stabilityContactResult = {
+  normal: new THREE.Vector3(0, 1, 0),
+  distance: 0,
+};
+const stabilitySampleWorld = new THREE.Vector3();
+const contactSurfaceNormal = new THREE.Vector3();
+const recoveryCandidateAxes = Array.from({ length: 4 }, () => new THREE.Vector3());
 const arenaWallPoint = new THREE.Vector3();
 
 const physics = new CANNON.World({
@@ -153,6 +174,13 @@ const touchInput = {
   throttle: 0,
   steer: 0,
   joystickPointerId: null,
+  joystickCenterX: 0,
+  joystickCenterY: 0,
+  joystickRadius: 0,
+};
+const lastTouchCommandAt = {
+  boost: -Infinity,
+  jump: -Infinity,
 };
 
 window.addEventListener("keydown", (event) => {
@@ -198,39 +226,60 @@ function updateInput() {
 
 function setJoystickInput(pointerX, pointerY) {
   const rect = joystickEl.getBoundingClientRect();
-  const radius = rect.width * 0.5;
-  const dx = pointerX - (rect.left + radius);
-  const dy = pointerY - (rect.top + radius);
-  const distance = Math.min(radius, Math.hypot(dx, dy));
-  const angle = Math.atan2(dy, dx);
-  const knobX = Math.cos(angle) * distance;
-  const knobY = Math.sin(angle) * distance;
-  const normalizedX = radius > 0 ? knobX / radius : 0;
-  const normalizedY = radius > 0 ? knobY / radius : 0;
-  const deadzone = 0.12;
+  const centerX = touchInput.joystickCenterX || rect.left + rect.width * 0.5;
+  const centerY = touchInput.joystickCenterY || rect.top + rect.height * 0.5;
+  const radius = touchInput.joystickRadius || rect.width * 0.42;
+  const dx = pointerX - centerX;
+  const dy = pointerY - centerY;
+  const rawDistance = Math.hypot(dx, dy);
+  const distance = Math.min(radius, rawDistance);
+  const unitX = rawDistance > 0.001 ? dx / rawDistance : 0;
+  const unitY = rawDistance > 0.001 ? dy / rawDistance : 0;
+  const knobX = unitX * distance;
+  const knobY = unitY * distance;
+  const deadzone = 0.14;
+  const rawMagnitude = radius > 0 ? distance / radius : 0;
+  const magnitude =
+    rawMagnitude <= deadzone ? 0 : (rawMagnitude - deadzone) / (1 - deadzone);
+  const normalizedX = unitX * magnitude;
+  const normalizedY = unitY * magnitude;
 
-  touchInput.steer = Math.abs(normalizedX) > deadzone ? -normalizedX : 0;
-  touchInput.throttle = Math.abs(normalizedY) > deadzone ? -normalizedY : 0;
+  touchInput.steer = -normalizedX;
+  touchInput.throttle = -normalizedY;
   joystickKnobEl.style.transform = `translate(calc(-50% + ${knobX}px), calc(-50% + ${knobY}px))`;
+}
+
+function cancelTouchEvent(event) {
+  if (event.cancelable) event.preventDefault();
 }
 
 function resetJoystickInput() {
   touchInput.throttle = 0;
   touchInput.steer = 0;
   touchInput.joystickPointerId = null;
+  touchInput.joystickCenterX = 0;
+  touchInput.joystickCenterY = 0;
+  touchInput.joystickRadius = 0;
   joystickKnobEl.style.transform = "translate(-50%, -50%)";
 }
 
 joystickEl.addEventListener("pointerdown", (event) => {
-  event.preventDefault();
+  cancelTouchEvent(event);
+  event.stopPropagation();
+  if (touchInput.joystickPointerId !== null) return;
+  const rect = joystickEl.getBoundingClientRect();
   touchInput.joystickPointerId = event.pointerId;
-  joystickEl.setPointerCapture(event.pointerId);
+  touchInput.joystickCenterX = rect.left + rect.width * 0.5;
+  touchInput.joystickCenterY = rect.top + rect.height * 0.5;
+  touchInput.joystickRadius = rect.width * 0.42;
+  if (joystickEl.setPointerCapture) joystickEl.setPointerCapture(event.pointerId);
   setJoystickInput(event.clientX, event.clientY);
 });
 
 joystickEl.addEventListener("pointermove", (event) => {
   if (touchInput.joystickPointerId !== event.pointerId) return;
-  event.preventDefault();
+  cancelTouchEvent(event);
+  event.stopPropagation();
   setJoystickInput(event.clientX, event.clientY);
 });
 
@@ -241,15 +290,35 @@ for (const eventName of ["pointerup", "pointercancel", "lostpointercapture"]) {
   });
 }
 
-boostHudEl.addEventListener("pointerdown", (event) => {
-  event.preventDefault();
-  input.boostQueued = true;
-});
+function handleTouchCommand(event, command) {
+  cancelTouchEvent(event);
+  event.stopPropagation();
+  const now = performance.now();
+  if (event.type === "click" && now - lastTouchCommandAt[command] < 650) return;
+  lastTouchCommandAt[command] = now;
+  if (command === "boost") input.boostQueued = true;
+  if (command === "jump") input.jumpQueued = true;
+}
 
-jumpButtonEl.addEventListener("pointerdown", (event) => {
-  event.preventDefault();
-  input.jumpQueued = true;
-});
+for (const eventName of ["pointerdown", "click"]) {
+  boostHudEl.addEventListener(eventName, (event) => handleTouchCommand(event, "boost"));
+  jumpButtonEl.addEventListener(eventName, (event) => handleTouchCommand(event, "jump"));
+}
+
+boostHudEl.addEventListener(
+  "touchstart",
+  (event) => handleTouchCommand(event, "boost"),
+  { passive: false },
+);
+jumpButtonEl.addEventListener(
+  "touchstart",
+  (event) => handleTouchCommand(event, "jump"),
+  { passive: false },
+);
+
+for (const element of [boostHudEl, jumpButtonEl, joystickEl]) {
+  element.addEventListener("contextmenu", (event) => cancelTouchEvent(event));
+}
 
 function makeArenaWallGeometry() {
   const segments = 80;
@@ -434,7 +503,8 @@ const stuntCarCanopyFaces = [
   [3, 7, 4, 0],
 ];
 
-const chassisBodyLift = 0;
+const chassisBodyLift = 0.16;
+const sideSkidAngle = 0.52;
 
 function liftCarVertices(verticesSource, yOffset = chassisBodyLift) {
   const vertices = [...verticesSource];
@@ -445,7 +515,9 @@ function liftCarVertices(verticesSource, yOffset = chassisBodyLift) {
 function makeConvexGeometry(vertices, faces) {
   const indices = [];
   for (const face of faces) {
-    indices.push(face[0], face[1], face[2], face[0], face[2], face[3]);
+    for (let i = 1; i < face.length - 1; i += 1) {
+      indices.push(face[0], face[i], face[i + 1]);
+    }
   }
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(vertices), 3));
@@ -885,8 +957,8 @@ const rampSideMaterial = new THREE.MeshStandardMaterial({
 });
 const rampEdgeMaterial = new THREE.LineBasicMaterial({
   color: 0xff4b1f,
-  transparent: true,
-  opacity: 0.86,
+  depthTest: false,
+  depthWrite: false,
 });
 
 const floor = new THREE.Mesh(
@@ -898,7 +970,7 @@ scene.add(floor);
 
 const ceiling = new THREE.Mesh(
   new THREE.CircleGeometry(worldSpec.floorRadius, 160).rotateX(Math.PI / 2),
-  wallMaterial,
+  arenaMaterial,
 );
 ceiling.position.y = worldSpec.ceilingY;
 ceiling.receiveShadow = true;
@@ -906,7 +978,7 @@ scene.add(ceiling);
 
 addArenaPhysics();
 
-function addRingMarkings() {
+function addRingMarkings(y = 0.04) {
   const group = new THREE.Group();
   const ringMaterial = new THREE.LineBasicMaterial({
     color: 0xf2e8d0,
@@ -923,7 +995,7 @@ function addRingMarkings() {
     const points = [];
     for (let i = 0; i <= 192; i += 1) {
       const a = (i / 192) * Math.PI * 2;
-      points.push(new THREE.Vector3(Math.cos(a) * radius, 0.035, Math.sin(a) * radius));
+      points.push(new THREE.Vector3(Math.cos(a) * radius, y, Math.sin(a) * radius));
     }
     group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), ringMaterial));
   }
@@ -931,15 +1003,16 @@ function addRingMarkings() {
   for (let i = 0; i < 16; i += 1) {
     const a = (i / 16) * Math.PI * 2;
     const points = [
-      new THREE.Vector3(Math.cos(a) * 10, 0.04, Math.sin(a) * 10),
-      new THREE.Vector3(Math.cos(a) * worldSpec.floorRadius, 0.04, Math.sin(a) * worldSpec.floorRadius),
+      new THREE.Vector3(Math.cos(a) * 10, y, Math.sin(a) * 10),
+      new THREE.Vector3(Math.cos(a) * worldSpec.floorRadius, y, Math.sin(a) * worldSpec.floorRadius),
     ];
     group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), spokeMaterial));
   }
 
   scene.add(group);
 }
-addRingMarkings();
+addRingMarkings(0.04);
+addRingMarkings(worldSpec.ceilingY - 0.04);
 
 function addLaunchMound({ position, yaw, width, length, height, topScale = 0.36 }) {
   const geometry = makeMoundGeometry(width, length, height, topScale);
@@ -1027,9 +1100,10 @@ function makeCarBodyVisual(color = 0xff512f) {
     metalness: 0.22,
   });
 
-  function addBoxFeature(width, height, length, x, y, z, material, castShadow = true) {
+  function addBoxFeature(width, height, length, x, y, z, material, castShadow = true, rotationZ = 0) {
     const feature = new THREE.Mesh(new THREE.BoxGeometry(width, height, length), material);
     feature.position.set(x, y + chassisBodyLift, z);
+    feature.rotation.z = rotationZ;
     feature.castShadow = castShadow;
     feature.receiveShadow = false;
     group.add(feature);
@@ -1050,8 +1124,8 @@ function makeCarBodyVisual(color = 0xff512f) {
   canopy.receiveShadow = false;
   group.add(canopy);
 
-  addBoxFeature(0.18, 0.16, 2.44, -1.08, -0.31, -0.14, trimMaterial, false);
-  addBoxFeature(0.18, 0.16, 2.44, 1.08, -0.31, -0.14, trimMaterial, false);
+  addBoxFeature(0.16, 0.14, 2.36, -1.06, -0.31, -0.14, trimMaterial, false, sideSkidAngle);
+  addBoxFeature(0.16, 0.14, 2.36, 1.06, -0.31, -0.14, trimMaterial, false, -sideSkidAngle);
   addBoxFeature(2.28, 0.08, 0.1, 0, -0.31, 1.46, trimMaterial, false);
   addBoxFeature(2.28, 0.08, 0.1, 0, -0.31, -1.44, trimMaterial, false);
   for (const z of [1.46, -1.44]) {
@@ -1073,7 +1147,7 @@ function makeCarBodyVisual(color = 0xff512f) {
 }
 
 let wheelVisualResources = null;
-const maxWheelVisualCars = 6;
+const maxWheelVisualCars = 8;
 const wheelsPerCar = 4;
 let globalWheelVisuals = null;
 const freeWheelVisualSlots = [];
@@ -1241,6 +1315,17 @@ const wheelPositions = [
   new CANNON.Vec3(1.18, -0.28, -1.44),
 ];
 
+const stabilitySamplePoints = [
+  new THREE.Vector3(0, 0, 0),
+  new THREE.Vector3(-1.16, -0.38, 1.1),
+  new THREE.Vector3(1.16, -0.38, 1.1),
+  new THREE.Vector3(-1.16, -0.38, -1.1),
+  new THREE.Vector3(1.16, -0.38, -1.1),
+  new THREE.Vector3(-1.12, 0.24, 0),
+  new THREE.Vector3(1.12, 0.24, 0),
+  new THREE.Vector3(0, 0.76, -0.18),
+];
+
 const vehicleTuning = {
   engineForce: 1600,
   reverseForce: 900,
@@ -1250,21 +1335,24 @@ const vehicleTuning = {
   steerResponse: 4.2,
   airPitchTorque: 1550,
   airYawTorque: 2100,
-  aiAirLevelTorque: 7200,
-  aiRecoveryLevelTorque: 14800,
-  aiAirAngularDamping: 720,
-  contactAssistMultiplier: 10.5,
-  contactAssistDelay: 0.3,
-  contactAssistReleaseDot: -0.35,
   contactAssistSurfaceGrace: 0.12,
-  contactAssistSurfaceDistance: 1.18,
-  contactAssistMaxSpeed: 16,
-  sideRecoveryDelay: 0.32,
-  sideRecoveryMaxSpeed: 24,
-  sideRecoveryTorque: 5200,
-  sideRecoveryDamping: 320,
-  sideRecoveryJumpVelocity: 8.2,
-  sideRecoveryJumpSpin: 4.9,
+  surfaceStabilityDistance: 1.45,
+  recoveryRollStartDot: 0.62,
+  recoveryRollEndDot: 0.78,
+  recoveryRollBaseSpeed: 5.8,
+  recoveryRollMaxSpeed: 9.2,
+  recoveryRollSettleSpeed: 1.35,
+  recoveryRollExitSpeed: 2.25,
+  recoveryRollAcceleration: 30,
+  recoveryRollBrakeAcceleration: 34,
+  recoveryRollSettleAngle: 0.72,
+  recoveryRollMinTargetAngle: 0.85,
+  recoveryRollMaxTargetAngle: 3.55,
+  recoveryRollLiftForce: 6200,
+  recoveryRollLiftArm: 1.16,
+  recoveryRollClearanceForce: 2400,
+  recoveryRollHandoffDot: 0.26,
+  recoveryRollHandoffSurfaceDot: 0.34,
   tagImmunityDuration: 1.6,
   itSpeedMultiplier: 1.1,
   boostForce: 7000,
@@ -1281,6 +1369,8 @@ const carPalette = [
   { name: "blue", hex: 0x4f8cff, css: "#4f8cff" },
   { name: "violet", hex: 0xb86cff, css: "#b86cff" },
   { name: "lime", hex: 0x9fe44d, css: "#9fe44d" },
+  { name: "orange", hex: 0xff7a2f, css: "#ff7a2f" },
+  { name: "pink", hex: 0xff6fd8, css: "#ff6fd8" },
 ];
 
 const spawnPoints = [
@@ -1308,12 +1398,17 @@ const roundTimerEl = document.querySelector("#round-timer");
 const itBannerEl = document.querySelector("#it-banner");
 const leaderboardEl = document.querySelector("#leaderboard");
 const resultsListEl = document.querySelector("#results-list");
+const countdownEl = document.querySelector("#countdown");
+const countdownValueEl = document.querySelector("#countdown-value");
 
 const gameState = {
   phase: "menu",
   selectedColor: carPalette[0],
   roundLength: 120,
   timeRemaining: 120,
+  countdownRemaining: 0,
+  countdownDuration: 3,
+  countdownText: "",
   playerCount: 4,
   cars: [],
   aiCars: [],
@@ -1396,6 +1491,23 @@ function makeInputState() {
   };
 }
 
+function installVehicleWheelRayFilter(vehicle) {
+  const castRay = vehicle.castRay.bind(vehicle);
+  vehicle.castRay = (wheel) => {
+    const disabledBodies = [];
+    for (const body of physics.bodies) {
+      if (!body.userData?.car || body.collisionResponse === false) continue;
+      disabledBodies.push(body);
+      body.collisionResponse = false;
+    }
+    try {
+      return castRay(wheel);
+    } finally {
+      for (const body of disabledBodies) body.collisionResponse = true;
+    }
+  };
+}
+
 function createCar({ id, name, color, isPlayer = false }) {
   const body = new CANNON.Body({
     mass: 180,
@@ -1405,10 +1517,10 @@ function createCar({ id, name, color, isPlayer = false }) {
     linearDamping: 0.04,
   });
   body.allowSleep = false;
-  function addChassisBox(halfExtents, offset, material = chassisMaterial) {
+  function addChassisBox(halfExtents, offset, material = chassisMaterial, orientation = null) {
     const shape = new CANNON.Box(halfExtents);
     shape.material = material;
-    body.addShape(shape, offset);
+    body.addShape(shape, offset, orientation);
   }
   function addChassisShape(shape, offset, material = chassisMaterial) {
     shape.material = material;
@@ -1421,14 +1533,19 @@ function createCar({ id, name, color, isPlayer = false }) {
   addChassisShape(noseCollider.shape, noseCollider.offset);
   const canopyCollider = makeStuntCarCanopyShape();
   addChassisShape(canopyCollider.shape, canopyCollider.offset, roofMaterial);
-  addChassisBox(new CANNON.Vec3(0.09, 0.08, 1.22), new CANNON.Vec3(-1.08, -0.31 + chassisBodyLift, -0.14));
-  addChassisBox(new CANNON.Vec3(0.09, 0.08, 1.22), new CANNON.Vec3(1.08, -0.31 + chassisBodyLift, -0.14));
+  const leftSkidQuat = new CANNON.Quaternion();
+  leftSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), sideSkidAngle);
+  const rightSkidQuat = new CANNON.Quaternion();
+  rightSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), -sideSkidAngle);
+  addChassisBox(new CANNON.Vec3(0.08, 0.07, 1.18), new CANNON.Vec3(-1.06, -0.31 + chassisBodyLift, -0.14), chassisMaterial, leftSkidQuat);
+  addChassisBox(new CANNON.Vec3(0.08, 0.07, 1.18), new CANNON.Vec3(1.06, -0.31 + chassisBodyLift, -0.14), chassisMaterial, rightSkidQuat);
   const vehicle = new CANNON.RaycastVehicle({
     chassisBody: body,
     indexRightAxis: 0,
     indexUpAxis: 1,
     indexForwardAxis: 2,
   });
+  installVehicleWheelRayFilter(vehicle);
   for (let i = 0; i < wheelPositions.length; i += 1) {
     const point = wheelPositions[i];
     const wheelSetup = i < 2 ? wheelOptions : rearWheelOptions;
@@ -1463,9 +1580,13 @@ function createCar({ id, name, color, isPlayer = false }) {
     boostTimeRemaining: 0,
     boostCooldownRemaining: 0,
     surfaceContactGrace: 0,
-    surfaceContactTime: 0,
-    airAssistContactTime: 0,
-    sideRecoveryTime: 0,
+    surfaceContactNormal: new THREE.Vector3(0, 1, 0),
+    surfaceContactCount: 0,
+    recoveryRollActive: false,
+    recoveryRollAxis: new THREE.Vector3(1, 0, 0),
+    recoveryRollProgress: 0,
+    recoveryRollTarget: 0,
+    stabilityAssist: 0,
     score: 0,
     isIt: false,
     immunityRemaining: 0,
@@ -1488,8 +1609,6 @@ function createCar({ id, name, color, isPlayer = false }) {
       decisionInterval: 0.1 + Math.random() * 0.06,
       objectiveTimer: 0,
       jumpCooldown: 0,
-      rightingTimer: 0,
-      recoveryCandidateTimer: 0,
     },
   };
   body.userData = { car };
@@ -1557,7 +1676,33 @@ function onCarBodyCollide(car, otherBody) {
   resolveCarTagPair(car, otherBody?.userData?.car);
 }
 
+function clearCarSurfaceContacts() {
+  for (const car of gameState.cars) {
+    car.surfaceContactNormal.set(0, 0, 0);
+    car.surfaceContactCount = 0;
+  }
+}
+
+function addCarSurfaceContact(car, contact, carIsBodyI) {
+  contactSurfaceNormal.set(contact.ni.x, contact.ni.y, contact.ni.z);
+  if (carIsBodyI) contactSurfaceNormal.multiplyScalar(-1);
+  car.surfaceContactNormal.add(contactSurfaceNormal);
+  car.surfaceContactCount += 1;
+  car.surfaceContactGrace = vehicleTuning.contactAssistSurfaceGrace;
+}
+
+function finalizeCarSurfaceContacts() {
+  for (const car of gameState.cars) {
+    if (car.surfaceContactCount > 0 && car.surfaceContactNormal.lengthSq() > 0.0001) {
+      car.surfaceContactNormal.normalize();
+    } else {
+      car.surfaceContactNormal.copy(upAxis);
+    }
+  }
+}
+
 function processPhysicsContacts() {
+  clearCarSurfaceContacts();
   if (gameState.phase !== "playing") return;
 
   for (const contact of physics.contacts) {
@@ -1566,17 +1711,18 @@ function processPhysicsContacts() {
     const carB = contact.bj?.userData?.car;
 
     if (carA && !carB) {
-      carA.surfaceContactGrace = vehicleTuning.contactAssistSurfaceGrace;
+      addCarSurfaceContact(carA, contact, true);
       continue;
     }
     if (carB && !carA) {
-      carB.surfaceContactGrace = vehicleTuning.contactAssistSurfaceGrace;
+      addCarSurfaceContact(carB, contact, false);
       continue;
     }
     if (!carA || !carB || carA === carB) continue;
 
     resolveCarTagPair(carA, carB);
   }
+  finalizeCarSurfaceContacts();
 }
 
 function clearVehicleInputs(car) {
@@ -1599,13 +1745,15 @@ function spawnCarAt(car, spawn) {
   car.boostTimeRemaining = 0;
   car.boostCooldownRemaining = 0;
   car.surfaceContactGrace = 0;
-  car.surfaceContactTime = 0;
-  car.airAssistContactTime = 0;
-  car.sideRecoveryTime = 0;
+  car.surfaceContactNormal.set(0, 1, 0);
+  car.surfaceContactCount = 0;
+  car.recoveryRollActive = false;
+  car.recoveryRollAxis.set(1, 0, 0);
+  car.recoveryRollProgress = 0;
+  car.recoveryRollTarget = 0;
+  car.stabilityAssist = 0;
   car.ai.stuckTimer = 0;
   car.ai.unstickTimer = 0;
-  car.ai.rightingTimer = 0;
-  car.ai.recoveryCandidateTimer = 0;
   car.ai.targetId = null;
   car.ai.decisionTimer = Math.random() * car.ai.decisionInterval;
   car.ai.objectiveTimer = 0;
@@ -1703,112 +1851,262 @@ function driveCar(car) {
   for (let i = 0; i < 4; i += 1) car.vehicle.setBrake(brake, i);
 }
 
-function applyAiAirStabilizer(car, surfaceNormal, carUp, surfaceUpDot) {
-  if (car.vehicle.numWheelsOnGround >= 2 && surfaceUpDot > 0.55) return;
-
-  tmpVec3C.copy(carUp).cross(surfaceNormal);
-  if (tmpVec3C.lengthSq() < 0.0001) {
-    if (surfaceUpDot > -0.85) return;
-    tmpVec3C.set(0, 0, 1).applyQuaternion(tmpQuat).normalize();
-  } else {
-    tmpVec3C.normalize();
+function closestStabilityContactForCar(car) {
+  if (car.surfaceContactCount > 0) {
+    stabilityContactResult.distance = 0;
+    stabilityContactResult.normal.copy(car.surfaceContactNormal);
+    return stabilityContactResult;
   }
 
-  const correction = THREE.MathUtils.clamp((1 - surfaceUpDot) * 0.5, 0, 1);
-  worldAirControlTorque.set(
-    tmpVec3C.x * vehicleTuning.aiAirLevelTorque * correction - car.body.angularVelocity.x * vehicleTuning.aiAirAngularDamping,
-    tmpVec3C.y * vehicleTuning.aiAirLevelTorque * correction - car.body.angularVelocity.y * vehicleTuning.aiAirAngularDamping,
-    tmpVec3C.z * vehicleTuning.aiAirLevelTorque * correction - car.body.angularVelocity.z * vehicleTuning.aiAirAngularDamping,
-  );
-  car.body.torque.vadd(worldAirControlTorque, car.body.torque);
-  car.body.wakeUp();
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  stabilityContactResult.distance = Infinity;
+  stabilityContactResult.normal.copy(upAxis);
+
+  for (const sample of stabilitySamplePoints) {
+    stabilitySampleWorld
+      .copy(sample)
+      .applyQuaternion(tmpQuat)
+      .add(car.body.position);
+    const contact = arenaContactForPoint(stabilitySampleWorld);
+    if (contact.distance < stabilityContactResult.distance) {
+      stabilityContactResult.distance = contact.distance;
+      stabilityContactResult.normal.copy(contact.normal);
+    }
+  }
+
+  return stabilityContactResult;
 }
 
-function applySideRecoveryAssist(car, contact, carUp, surfaceUpDot, speed) {
-  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
-  const carRight = tmpVec3D.set(1, 0, 0).applyQuaternion(tmpQuat).normalize();
-  const sideDot = Math.abs(carRight.dot(contact.normal));
-  const sideBound =
-    car.vehicle.numWheelsOnGround < 2 &&
-    Math.abs(surfaceUpDot) < 0.34 &&
-    sideDot > 0.62 &&
-    speed < vehicleTuning.sideRecoveryMaxSpeed &&
-    (car.surfaceContactGrace > 0 || contact.distance < vehicleTuning.contactAssistSurfaceDistance);
+function resetRecoveryRoll(car) {
+  car.recoveryRollActive = false;
+  car.recoveryRollProgress = 0;
+  car.recoveryRollTarget = 0;
+  car.stabilityAssist = 0;
+}
 
-  car.sideRecoveryTime = sideBound
-    ? Math.min(1, car.sideRecoveryTime + fixedStep)
-    : Math.max(0, car.sideRecoveryTime - fixedStep * 5);
+function rollDistanceToUpright(axis, carUp, surfaceNormal) {
+  tmpVec3A.copy(carUp).addScaledVector(axis, -carUp.dot(axis));
+  tmpVec3B.copy(surfaceNormal).addScaledVector(axis, -surfaceNormal.dot(axis));
+  if (tmpVec3A.lengthSq() < 0.0001 || tmpVec3B.lengthSq() < 0.0001) return Math.PI;
+  tmpVec3A.normalize();
+  tmpVec3B.normalize();
+  const sin = tmpVec3C.copy(tmpVec3A).cross(tmpVec3B).dot(axis);
+  const cos = THREE.MathUtils.clamp(tmpVec3A.dot(tmpVec3B), -1, 1);
+  const angle = Math.atan2(sin, cos);
+  return angle >= 0 ? angle : angle + Math.PI * 2;
+}
 
-  if (car.sideRecoveryTime < vehicleTuning.sideRecoveryDelay) return false;
-  const controlIntent = !car.isPlayer || Math.abs(car.input.throttle) + Math.abs(car.input.steer) > 0.15 || car.input.jumpQueued;
-  if (!controlIntent) return false;
-
-  tmpVec3C.copy(carUp).cross(contact.normal);
-  if (tmpVec3C.lengthSq() < 0.0001) return false;
-  tmpVec3C.normalize();
-
-  const strength = vehicleTuning.sideRecoveryTorque * (car.isPlayer ? 1 : 1.18);
-  worldAirControlTorque.set(
-    tmpVec3C.x * strength - car.body.angularVelocity.x * vehicleTuning.sideRecoveryDamping,
-    tmpVec3C.y * strength - car.body.angularVelocity.y * vehicleTuning.sideRecoveryDamping,
-    tmpVec3C.z * strength - car.body.angularVelocity.z * vehicleTuning.sideRecoveryDamping,
-  );
-  car.body.torque.vadd(worldAirControlTorque, car.body.torque);
-  car.body.wakeUp();
+function setRecoveryCandidate(index, source, surfaceNormal) {
+  const candidate = recoveryCandidateAxes[index];
+  candidate.copy(source).addScaledVector(surfaceNormal, -source.dot(surfaceNormal));
+  const lengthSq = candidate.lengthSq();
+  if (lengthSq < 0.0001) {
+    candidate.set(0, 0, 0);
+    return false;
+  }
+  candidate.multiplyScalar(1 / Math.sqrt(lengthSq));
   return true;
+}
+
+function startRecoveryRoll(car, contact, carUp, surfaceVelocity, planarSpeed, downhill, downhillStrength) {
+  setRecoveryCandidate(0, tmpVec3E.set(car.body.angularVelocity.x, car.body.angularVelocity.y, car.body.angularVelocity.z), contact.normal);
+  recoveryCandidateAxes[1].copy(contact.normal).cross(surfaceVelocity);
+  if (recoveryCandidateAxes[1].lengthSq() > 0.0001) recoveryCandidateAxes[1].normalize();
+  else recoveryCandidateAxes[1].set(0, 0, 0);
+  recoveryCandidateAxes[2].copy(contact.normal).cross(downhill);
+  if (recoveryCandidateAxes[2].lengthSq() > 0.0001) recoveryCandidateAxes[2].normalize();
+  else recoveryCandidateAxes[2].set(0, 0, 0);
+  recoveryCandidateAxes[3].copy(carUp).cross(contact.normal);
+  if (recoveryCandidateAxes[3].lengthSq() > 0.0001) recoveryCandidateAxes[3].normalize();
+  else {
+    setRecoveryCandidate(3, tmpVec3E.set(0, 0, 1).applyQuaternion(tmpQuat), contact.normal) ||
+      setRecoveryCandidate(3, tmpVec3E.set(1, 0, 0).applyQuaternion(tmpQuat), contact.normal);
+  }
+
+  let bestScore = -Infinity;
+  let bestDistance = Math.PI;
+  car.recoveryRollAxis.set(1, 0, 0);
+  const surfaceWeight = THREE.MathUtils.clamp(planarSpeed / 9, 0, 1);
+
+  for (const candidate of recoveryCandidateAxes) {
+    if (candidate.lengthSq() < 0.0001) continue;
+    for (const sign of [1, -1]) {
+      tmpVec3D.copy(candidate).multiplyScalar(sign);
+      const distance = rollDistanceToUpright(tmpVec3D, carUp, contact.normal);
+      const rollVelocity =
+        car.body.angularVelocity.x * tmpVec3D.x +
+        car.body.angularVelocity.y * tmpVec3D.y +
+        car.body.angularVelocity.z * tmpVec3D.z;
+      const surfaceAlignment = recoveryCandidateAxes[1].lengthSq() > 0.0001
+        ? Math.max(0, tmpVec3D.dot(recoveryCandidateAxes[1])) * surfaceWeight
+        : 0;
+      const downhillAlignment = recoveryCandidateAxes[2].lengthSq() > 0.0001
+        ? Math.max(0, tmpVec3D.dot(recoveryCandidateAxes[2])) * downhillStrength
+        : 0;
+      const longRollPenalty = Math.max(0, distance - Math.PI * 1.18) * 2.2;
+      const score =
+        Math.max(0, rollVelocity) * 0.36 +
+        surfaceAlignment * 1.15 +
+        downhillAlignment * 0.85 -
+        distance * 0.72 -
+        longRollPenalty;
+      if (score > bestScore) {
+        bestScore = score;
+        bestDistance = distance;
+        car.recoveryRollAxis.copy(tmpVec3D);
+      }
+    }
+  }
+
+  car.recoveryRollActive = bestScore > -Infinity;
+  car.recoveryRollProgress = 0;
+  car.recoveryRollTarget = THREE.MathUtils.clamp(
+    bestDistance,
+    vehicleTuning.recoveryRollMinTargetAngle,
+    vehicleTuning.recoveryRollMaxTargetAngle,
+  );
+}
+
+function applySurfaceStability(car, contact, carUp, surfaceUpDot) {
+  const wheelsGrounded = car.vehicle.numWheelsOnGround > 0;
+  const nearSurface = Math.max(
+    wheelsGrounded ? 1 : 0,
+    THREE.MathUtils.clamp(1 - contact.distance / vehicleTuning.surfaceStabilityDistance, 0, 1),
+  );
+  tmpVec3D.set(car.body.velocity.x, car.body.velocity.y, car.body.velocity.z);
+  tmpVec3D.addScaledVector(contact.normal, -tmpVec3D.dot(contact.normal));
+  const planarSpeed = tmpVec3D.length();
+
+  tmpVec3A.set(physics.gravity.x, physics.gravity.y, physics.gravity.z);
+  tmpVec3A.addScaledVector(contact.normal, -tmpVec3A.dot(contact.normal));
+  const downhillStrength = THREE.MathUtils.clamp(tmpVec3A.length() / Math.max(0.001, physics.gravity.length()), 0, 1);
+
+  const recoverableContact =
+    car.vehicle.numWheelsOnGround >= 2 &&
+    (carUp.dot(upAxis) > vehicleTuning.recoveryRollHandoffDot || surfaceUpDot > vehicleTuning.recoveryRollHandoffSurfaceDot);
+  const shouldStartRoll = nearSurface > 0.001 && !recoverableContact && surfaceUpDot < vehicleTuning.recoveryRollStartDot;
+  const shouldContinueRoll =
+    car.recoveryRollActive &&
+    nearSurface > 0.001 &&
+    !recoverableContact &&
+    surfaceUpDot < vehicleTuning.recoveryRollEndDot;
+  if (!car.recoveryRollActive && shouldStartRoll) {
+    startRecoveryRoll(car, contact, carUp, tmpVec3D, planarSpeed, tmpVec3A, downhillStrength);
+  } else if (!shouldContinueRoll) {
+    resetRecoveryRoll(car);
+    return;
+  }
+  if (!car.recoveryRollActive) {
+    resetRecoveryRoll(car);
+    return;
+  }
+
+  tmpVec3C.copy(car.recoveryRollAxis).addScaledVector(contact.normal, -car.recoveryRollAxis.dot(contact.normal));
+  if (tmpVec3C.lengthSq() < 0.0001) {
+    resetRecoveryRoll(car);
+    return;
+  }
+  tmpVec3C.normalize();
+  if (tmpVec3C.dot(car.recoveryRollAxis) < 0) tmpVec3C.multiplyScalar(-1);
+  car.recoveryRollAxis.copy(tmpVec3C);
+
+  const rollVelocity =
+    car.body.angularVelocity.x * tmpVec3C.x +
+    car.body.angularVelocity.y * tmpVec3C.y +
+    car.body.angularVelocity.z * tmpVec3C.z;
+  const recoveryDepth = THREE.MathUtils.clamp(
+    (vehicleTuning.recoveryRollStartDot - surfaceUpDot) /
+      Math.max(0.001, vehicleTuning.recoveryRollStartDot + 1),
+    0,
+    1,
+  );
+  car.recoveryRollProgress += Math.max(0, rollVelocity) * fixedStep;
+  const remainingRoll = car.recoveryRollTarget - car.recoveryRollProgress;
+  const targetRollVelocity = THREE.MathUtils.lerp(
+    vehicleTuning.recoveryRollBaseSpeed,
+    vehicleTuning.recoveryRollMaxSpeed,
+    recoveryDepth,
+  );
+  const settleT = THREE.MathUtils.clamp(
+    1 - remainingRoll / Math.max(0.001, vehicleTuning.recoveryRollSettleAngle),
+    0,
+    1,
+  );
+  const settleEase = settleT * settleT * (3 - 2 * settleT);
+  const settledTargetRollVelocity = THREE.MathUtils.lerp(
+    targetRollVelocity,
+    vehicleTuning.recoveryRollSettleSpeed,
+    settleEase,
+  );
+  const overshootT = THREE.MathUtils.clamp(
+    -remainingRoll / Math.max(0.001, vehicleTuning.recoveryRollSettleAngle),
+    0,
+    1,
+  );
+  const rolloutTargetRollVelocity = THREE.MathUtils.lerp(
+    settledTargetRollVelocity,
+    vehicleTuning.recoveryRollExitSpeed,
+    overshootT,
+  );
+  const rollAcceleration = THREE.MathUtils.lerp(
+    vehicleTuning.recoveryRollAcceleration,
+    vehicleTuning.recoveryRollBrakeAcceleration,
+    Math.max(settleEase, overshootT * 0.65),
+  ) * nearSurface;
+  const rollDelta = THREE.MathUtils.clamp(
+    rolloutTargetRollVelocity - rollVelocity,
+    -rollAcceleration * fixedStep,
+    rollAcceleration * fixedStep,
+  );
+  car.body.angularVelocity.x += tmpVec3C.x * rollDelta;
+  car.body.angularVelocity.y += tmpVec3C.y * rollDelta;
+  car.body.angularVelocity.z += tmpVec3C.z * rollDelta;
+
+  const liftAssist = nearSurface * recoveryDepth;
+  if (liftAssist > 0.001) {
+    recoveryForce.set(
+      contact.normal.x * vehicleTuning.recoveryRollClearanceForce * liftAssist,
+      contact.normal.y * vehicleTuning.recoveryRollClearanceForce * liftAssist,
+      contact.normal.z * vehicleTuning.recoveryRollClearanceForce * liftAssist,
+    );
+    recoveryPoint.set(0, 0, 0);
+    car.body.applyForce(recoveryForce, recoveryPoint);
+    tmpVec3E.copy(contact.normal).cross(tmpVec3C);
+    if (tmpVec3E.lengthSq() > 0.0001) tmpVec3E.normalize().multiplyScalar(vehicleTuning.recoveryRollLiftArm);
+    recoveryForce.set(
+      contact.normal.x * vehicleTuning.recoveryRollLiftForce * liftAssist,
+      contact.normal.y * vehicleTuning.recoveryRollLiftForce * liftAssist,
+      contact.normal.z * vehicleTuning.recoveryRollLiftForce * liftAssist,
+    );
+    recoveryPoint.set(tmpVec3E.x, tmpVec3E.y, tmpVec3E.z);
+    car.body.applyForce(recoveryForce, recoveryPoint);
+  }
+  car.body.wakeUp();
+  car.stabilityAssist = nearSurface * recoveryDepth;
 }
 
 function applyAirControls(car) {
   if (gameState.phase !== "playing") return;
 
   car.surfaceContactGrace = Math.max(0, car.surfaceContactGrace - fixedStep);
-  const carPosition = tmpVec3A.set(car.body.position.x, car.body.position.y, car.body.position.z);
-  const contact = arenaContactForPoint(carPosition);
+  const contact = closestStabilityContactForCar(car);
   tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
   const carUp = tmpVec3B.set(0, 1, 0).applyQuaternion(tmpQuat).normalize();
   const surfaceUpDot = carUp.dot(contact.normal);
-  const speed = car.body.velocity.length();
-  const nearSurfaceBind =
-    surfaceUpDot < vehicleTuning.contactAssistReleaseDot &&
-    (car.surfaceContactGrace > 0 || contact.distance < vehicleTuning.contactAssistSurfaceDistance) &&
-    speed < vehicleTuning.contactAssistMaxSpeed;
-  car.surfaceContactTime =
-    car.surfaceContactGrace > 0 || nearSurfaceBind
-      ? Math.min(1, car.surfaceContactTime + fixedStep)
-      : Math.max(0, car.surfaceContactTime - fixedStep * 4);
+  applySurfaceStability(car, contact, carUp, surfaceUpDot);
   const tippedEnoughForAirControl = surfaceUpDot < 0.55;
-  const sideRecoveryActive = applySideRecoveryAssist(car, contact, carUp, surfaceUpDot, speed);
 
-  if (!car.isPlayer) {
-    if (!sideRecoveryActive) applyAiAirStabilizer(car, contact.normal, carUp, surfaceUpDot);
-    return;
-  }
+  if (!car.isPlayer) return;
 
   if (car.vehicle.numWheelsOnGround >= 2 && !tippedEnoughForAirControl) return;
 
   const pitchInput = car.input.throttle;
   const yawInput = car.input.steer;
-  if (pitchInput === 0 && yawInput === 0) {
-    car.airAssistContactTime = Math.max(0, car.airAssistContactTime - fixedStep * 8);
-    return;
-  }
-
-  const eligibleForContactAssist =
-    tippedEnoughForAirControl &&
-    (surfaceUpDot < vehicleTuning.contactAssistReleaseDot || sideRecoveryActive) &&
-    car.surfaceContactTime >= vehicleTuning.contactAssistDelay &&
-    speed < vehicleTuning.contactAssistMaxSpeed;
-  car.airAssistContactTime = eligibleForContactAssist
-    ? Math.min(1, car.airAssistContactTime + fixedStep)
-    : Math.max(0, car.airAssistContactTime - fixedStep * 8);
-  const contactAssist =
-    eligibleForContactAssist && car.airAssistContactTime > 0
-      ? vehicleTuning.contactAssistMultiplier
-      : 1;
+  if (pitchInput === 0 && yawInput === 0) return;
 
   airControlTorque.set(
-    pitchInput * vehicleTuning.airPitchTorque * contactAssist,
-    yawInput * vehicleTuning.airYawTorque * contactAssist,
+    pitchInput * vehicleTuning.airPitchTorque,
+    yawInput * vehicleTuning.airYawTorque,
     0,
   );
   car.body.vectorToWorldFrame(airControlTorque, worldAirControlTorque);
@@ -1854,22 +2152,6 @@ function applyQueuedJump(car) {
     car.body.velocity.y = Math.max(car.body.velocity.y, vehicleTuning.jumpVelocity);
     car.body.angularVelocity.x = 0;
     car.body.angularVelocity.z = 0;
-  } else if (car.sideRecoveryTime >= vehicleTuning.sideRecoveryDelay) {
-    const carPosition = tmpVec3A.set(car.body.position.x, car.body.position.y, car.body.position.z);
-    const contact = arenaContactForPoint(carPosition);
-    tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
-    const carUp = tmpVec3B.set(0, 1, 0).applyQuaternion(tmpQuat).normalize();
-    tmpVec3C.copy(carUp).cross(contact.normal);
-    if (tmpVec3C.lengthSq() > 0.0001) {
-      tmpVec3C.normalize();
-      car.body.velocity.x += contact.normal.x * vehicleTuning.sideRecoveryJumpVelocity;
-      car.body.velocity.y = Math.max(car.body.velocity.y, contact.normal.y * vehicleTuning.sideRecoveryJumpVelocity + 2.2);
-      car.body.velocity.z += contact.normal.z * vehicleTuning.sideRecoveryJumpVelocity;
-      car.body.angularVelocity.x += tmpVec3C.x * vehicleTuning.sideRecoveryJumpSpin;
-      car.body.angularVelocity.y += tmpVec3C.y * vehicleTuning.sideRecoveryJumpSpin;
-      car.body.angularVelocity.z += tmpVec3C.z * vehicleTuning.sideRecoveryJumpSpin;
-      car.body.wakeUp();
-    }
   }
 
   car.input.jumpQueued = false;
@@ -2146,49 +2428,6 @@ function chooseAiEscapeVector(car, threat, desired, dt) {
   desired.copy(car.ai.objective).sub(pos);
 }
 
-function applyAiRecovery(car, dt, surfaceUpDot) {
-  const speed = car.body.velocity.length();
-  const nearSurface = car.surfaceContactTime > 0.28 || car.surfaceContactGrace > 0;
-  const actualBind = speed < 2.2 && car.vehicle.numWheelsOnGround < 2 && surfaceUpDot < -0.38 && nearSurface;
-  car.ai.recoveryCandidateTimer = actualBind
-    ? car.ai.recoveryCandidateTimer + dt
-    : Math.max(0, car.ai.recoveryCandidateTimer - dt * 3);
-
-  if (car.ai.recoveryCandidateTimer < 0.42) {
-    car.ai.rightingTimer = 0;
-    return false;
-  }
-
-  car.ai.rightingTimer += dt;
-  car.input.throttle = 1;
-  car.input.steer = 0;
-
-  const carPosition = tmpVec3A.set(car.body.position.x, car.body.position.y, car.body.position.z);
-  const contact = arenaContactForPoint(carPosition);
-  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
-  const carUp = tmpVec3B.set(0, 1, 0).applyQuaternion(tmpQuat).normalize();
-  tmpVec3C.copy(carUp).cross(contact.normal);
-  if (tmpVec3C.lengthSq() < 0.0001) tmpVec3C.set(0, 0, 1).applyQuaternion(tmpQuat).normalize();
-  else tmpVec3C.normalize();
-
-  const recoveryPower = vehicleTuning.aiRecoveryLevelTorque * (car.isIt ? 1.22 : 1);
-  worldAirControlTorque.set(
-    tmpVec3C.x * recoveryPower - car.body.angularVelocity.x * vehicleTuning.aiAirAngularDamping,
-    tmpVec3C.y * recoveryPower - car.body.angularVelocity.y * vehicleTuning.aiAirAngularDamping,
-    tmpVec3C.z * recoveryPower - car.body.angularVelocity.z * vehicleTuning.aiAirAngularDamping,
-  );
-  car.body.torque.vadd(worldAirControlTorque, car.body.torque);
-
-  if (car.ai.rightingTimer > 0.65 && contact.distance < 1.2) {
-    car.body.velocity.x += contact.normal.x * 0.16;
-    car.body.velocity.y = Math.max(car.body.velocity.y, contact.normal.y * 4.2);
-    car.body.velocity.z += contact.normal.z * 0.16;
-  }
-  car.body.wakeUp();
-
-  return true;
-}
-
 function updateAiCar(car, dt) {
   car.input.boost = false;
   car.input.boostQueued = false;
@@ -2210,8 +2449,6 @@ function updateAiCar(car, dt) {
   const itCar = gameState.itCar;
   const desired = car.ai.desired.set(0, 0, 0);
   let activeTarget = null;
-  const surfaceUpDot = surfaceUpDotForCar(car);
-  if (applyAiRecovery(car, dt, surfaceUpDot)) return;
   if (car.ai.decisionTimer > 0) return;
   car.ai.decisionTimer = car.ai.decisionInterval;
 
@@ -2333,6 +2570,28 @@ function updateRound(dt) {
   if (gameState.timeRemaining <= 0) endRound();
 }
 
+function setCountdownText(text) {
+  if (gameState.countdownText === text) return;
+  gameState.countdownText = text;
+  countdownValueEl.textContent = text;
+  countdownValueEl.style.animation = "none";
+  countdownValueEl.offsetHeight;
+  countdownValueEl.style.animation = "";
+}
+
+function updateCountdown(dt) {
+  if (gameState.phase !== "countdown") return;
+
+  gameState.countdownRemaining = Math.max(0, gameState.countdownRemaining - dt);
+  setCountdownText(String(Math.max(1, Math.ceil(gameState.countdownRemaining))));
+  if (gameState.countdownRemaining > 0) return;
+
+  gameState.phase = "playing";
+  setUiPhase("playing");
+  countdownEl.classList.add("hidden");
+  gameState.countdownText = "";
+}
+
 function updateLeaderboard() {
   const timerText = formatTime(gameState.timeRemaining);
   if (hudCache.timerText !== timerText) {
@@ -2388,11 +2647,17 @@ function startRound() {
   const spawns = shuffle(spawnPoints);
   gameState.cars.forEach((car, index) => spawnCarAt(car, spawns[index % spawns.length]));
 
-  gameState.itCar = gameState.cars[Math.floor(Math.random() * gameState.cars.length)];
-  gameState.itCar.isIt = true;
+  gameState.itCar = gameState.cars.length > 1
+    ? gameState.cars[Math.floor(Math.random() * gameState.cars.length)]
+    : null;
+  if (gameState.itCar) gameState.itCar.isIt = true;
   gameState.tagCooldown = 0;
-  gameState.phase = "playing";
-  setUiPhase("playing");
+  gameState.countdownRemaining = gameState.countdownDuration;
+  gameState.countdownText = "";
+  setCountdownText("3");
+  countdownEl.classList.remove("hidden");
+  gameState.phase = "countdown";
+  setUiPhase("countdown");
   gameState.leaderboardDirty = true;
   startScreenEl.classList.add("hidden");
   endScreenEl.classList.add("hidden");
@@ -2401,6 +2666,7 @@ function startRound() {
 function endRound() {
   gameState.phase = "ended";
   setUiPhase("ended");
+  countdownEl.classList.add("hidden");
   for (const car of gameState.cars) clearVehicleInputs(car);
   const sorted = [...gameState.cars].sort((a, b) => b.score - a.score);
   resultsListEl.innerHTML = "";
@@ -2433,6 +2699,9 @@ function returnToMenu() {
   gameState.aiCars = [];
   gameState.cars = [playerCar];
   gameState.itCar = null;
+  gameState.countdownRemaining = 0;
+  gameState.countdownText = "";
+  countdownEl.classList.add("hidden");
   spawnCarAt(playerCar, spawnPoints[0]);
   startScreenEl.classList.remove("hidden");
   endScreenEl.classList.add("hidden");
@@ -2497,30 +2766,73 @@ function cameraLineBlocked(origin, candidate) {
   return cameraRayHits.length > 0;
 }
 
+function keepCameraInsideArena(point, clearance = 1.15) {
+  const contact = arenaContactForPoint(point);
+  if (contact.distance < clearance) point.addScaledVector(contact.normal, clearance - contact.distance);
+  return point;
+}
+
+function cameraArenaPathBlocked(origin, candidate, clearance = 1.05) {
+  const path = cameraToCandidate.copy(candidate).sub(origin);
+  const distance = path.length();
+  if (distance <= 0.001) return false;
+  const steps = Math.max(4, Math.ceil(distance / 3.2));
+  for (let i = 1; i <= steps; i += 1) {
+    cameraPathSample.copy(origin).addScaledVector(path, i / steps);
+    if (arenaContactForPoint(cameraPathSample).distance < clearance) return true;
+  }
+  return false;
+}
+
+function cameraPathBlocked(origin, candidate) {
+  return cameraArenaPathBlocked(origin, candidate) || cameraLineBlocked(origin, candidate);
+}
+
+function enforceCameraDistance(origin, candidate, minDistance = 8.5) {
+  const offset = cameraSafeOffset.copy(candidate).sub(origin);
+  const distance = offset.length();
+  if (distance >= minDistance || distance <= 0.001) return candidate;
+  candidate.copy(origin).addScaledVector(offset, minDistance / distance);
+  return candidate;
+}
+
 function resolveCameraPosition(origin, desiredPosition, cameraUp, carRight) {
   const towardDesired = cameraState.towardDesired.copy(desiredPosition).sub(origin);
+  const distance = Math.max(0.001, towardDesired.length());
+  const chaseDirection = cameraSafeDirection.copy(towardDesired).multiplyScalar(1 / distance);
+  const minDistance = 8.5;
+  const preferredDistance = Math.max(distance, minDistance);
+
   cameraCandidates[0].copy(desiredPosition);
-  cameraCandidates[1].copy(desiredPosition).addScaledVector(cameraUp, 2.4);
-  cameraCandidates[2].copy(desiredPosition).addScaledVector(cameraUp, 4.8);
-  cameraCandidates[3].copy(desiredPosition).addScaledVector(carRight, 3.2).addScaledVector(cameraUp, 2.8);
-  cameraCandidates[4].copy(desiredPosition).addScaledVector(carRight, -3.2).addScaledVector(cameraUp, 2.8);
-  cameraCandidates[5].copy(origin).addScaledVector(towardDesired, 0.82).addScaledVector(cameraUp, 3.6);
-  cameraCandidates[6].copy(origin).addScaledVector(towardDesired, 0.68).addScaledVector(cameraUp, 5.2);
+  cameraCandidates[1].copy(origin).addScaledVector(chaseDirection, preferredDistance).addScaledVector(cameraUp, 2.0);
+  cameraCandidates[2].copy(origin).addScaledVector(chaseDirection, preferredDistance).addScaledVector(cameraUp, 4.4);
+  cameraCandidates[3].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.92).addScaledVector(carRight, 3.6).addScaledVector(cameraUp, 3.1);
+  cameraCandidates[4].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.92).addScaledVector(carRight, -3.6).addScaledVector(cameraUp, 3.1);
+  cameraCandidates[5].copy(origin).addScaledVector(chaseDirection, preferredDistance * 1.14).addScaledVector(cameraUp, 5.2);
+  cameraCandidates[6].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.72).addScaledVector(cameraUp, 7.2);
+  cameraCandidates[7].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(cameraUp, 6.2);
+  cameraCandidates[8].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(carRight, 4.8).addScaledVector(cameraUp, 4.6);
+  cameraCandidates[9].copy(origin).addScaledVector(chaseDirection, minDistance).addScaledVector(carRight, -4.8).addScaledVector(cameraUp, 4.6);
+  cameraCandidates[10].copy(origin).addScaledVector(chaseDirection, preferredDistance * 0.55).addScaledVector(cameraUp, 9.0);
 
   for (const candidate of cameraCandidates) {
-    const arenaContact = arenaContactForPoint(candidate);
-    if (arenaContact.distance < 0.85) candidate.addScaledVector(arenaContact.normal, 0.85 - arenaContact.distance);
-    if (!cameraLineBlocked(origin, candidate)) return cameraState.resolvedPosition.copy(candidate);
+    enforceCameraDistance(origin, candidate, minDistance);
+    keepCameraInsideArena(candidate, 1.15);
+    if (!cameraPathBlocked(origin, candidate)) return cameraState.resolvedPosition.copy(candidate);
   }
 
-  const direction = towardDesired.normalize();
+  const direction = chaseDirection;
   cameraRaycaster.set(origin, direction);
   cameraRaycaster.near = 0.85;
-  cameraRaycaster.far = Math.max(1, desiredPosition.distanceTo(origin));
+  cameraRaycaster.far = Math.max(minDistance, preferredDistance);
   cameraRayHits.length = 0;
   cameraRaycaster.intersectObjects(cameraCollisionMeshes, false, cameraRayHits);
-  const fallbackDistance = cameraRayHits.length > 0 ? Math.max(5.5, cameraRayHits[0].distance - 1.25) : 8;
-  return cameraState.resolvedPosition.copy(origin).addScaledVector(direction, fallbackDistance).addScaledVector(cameraUp, 2.8);
+  const fallbackDistance = cameraRayHits.length > 0
+    ? Math.max(minDistance, cameraRayHits[0].distance - 1.25)
+    : Math.max(minDistance, preferredDistance * 0.72);
+  cameraState.resolvedPosition.copy(origin).addScaledVector(direction, fallbackDistance).addScaledVector(cameraUp, 6.2);
+  keepCameraInsideArena(cameraState.resolvedPosition, 1.25);
+  return cameraState.resolvedPosition;
 }
 
 function syncCarVisual(car, interpolationAlpha, visualTime) {
@@ -2544,6 +2856,10 @@ function syncCarVisual(car, interpolationAlpha, visualTime) {
     car.vehicle.updateWheelTransform(i);
     const transform = car.vehicle.wheelInfos[i].worldTransform;
     wheelVisualPosition.set(transform.position.x, transform.position.y, transform.position.z);
+    const wheelContact = arenaContactForPoint(wheelVisualPosition);
+    if (wheelContact.distance < minWheelVisualSurfaceClearance) {
+      wheelVisualPosition.addScaledVector(wheelContact.normal, minWheelVisualSurfaceClearance - wheelContact.distance);
+    }
     wheelVisualQuaternion.set(transform.quaternion.x, transform.quaternion.y, transform.quaternion.z, transform.quaternion.w);
     wheelMatrix.compose(wheelVisualPosition, wheelVisualQuaternion, wheelVisualScale);
     car.wheelVisuals.tires.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
@@ -2569,52 +2885,45 @@ function syncCarVisual(car, interpolationAlpha, visualTime) {
   }
 }
 
-function syncVisuals(dt, interpolationAlpha) {
-  const visualTime = performance.now();
-  for (const car of gameState.cars) syncCarVisual(car, interpolationAlpha, visualTime);
-  if (globalWheelVisuals) {
-    globalWheelVisuals.tires.instanceMatrix.needsUpdate = true;
-    globalWheelVisuals.rims.instanceMatrix.needsUpdate = true;
-  }
+function syncCountdownCamera() {
+  const rawForward = cameraRawForward.set(0, 0, 1).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const rawUp = cameraRawUp.set(0, 1, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const rawRight = cameraRawRight.set(1, 0, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const progress = THREE.MathUtils.clamp(
+    1 - gameState.countdownRemaining / Math.max(0.001, gameState.countdownDuration),
+    0,
+    1,
+  );
+  const descentT = progress * progress * (3 - 2 * progress);
+  const flipT = THREE.MathUtils.clamp((progress - 0.18) / 0.82, 0, 1);
+  const flipEase = flipT * flipT * (3 - 2 * flipT);
+  const carPosition = playerCar.visual.position;
 
-  const grounded = playerCar.vehicle.numWheelsOnGround > 0;
-  const rawForward = tmpVec3A.set(0, 0, 1).applyQuaternion(playerCar.visual.quaternion).normalize();
-  const rawUp = tmpVec3B.set(0, 1, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
-  const rawRight = tmpVec3C.set(1, 0, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
-  if (grounded) {
-    cameraState.followForward.copy(rawForward);
-    cameraState.followUp.copy(rawUp);
-    cameraState.followRight.copy(rawRight);
-  }
+  countdownCameraStart
+    .set(0, worldSpec.ceilingY - 8.5, worldSpec.floorRadius * 0.08);
+  countdownCameraEnd
+    .copy(carPosition)
+    .addScaledVector(rawForward, -13.2)
+    .addScaledVector(upAxis, 6.4)
+    .addScaledVector(rawRight, -playerCar.input.steer * 0.8);
+  countdownCameraTargetStart
+    .set(0, 0.8, 0);
+  countdownCameraTargetEnd
+    .copy(carPosition)
+    .addScaledVector(rawForward, 4.2)
+    .addScaledVector(rawUp, 1.15);
 
-  const carForward = grounded ? rawForward : cameraState.followForward;
-  const carUp = grounded ? rawUp : cameraState.followUp;
-  const carRight = grounded ? rawRight : cameraState.followRight;
-  const cameraUpBias = grounded ? 0.45 : 0.9;
-  const cameraUp = tmpVec3D.copy(carUp).lerp(upAxis, cameraUpBias).normalize();
-  const leadDistance = grounded ? 4.0 : 2.6;
-  const chaseDistance = grounded ? 12 : 16;
-  const cameraHeight = grounded ? 5.4 : 7.4;
-  const lateralOffset = grounded ? -playerCar.input.steer * 1.2 : 0;
-
-  const desiredTarget = cameraState.desiredTarget.copy(playerCar.visual.position).addScaledVector(cameraUp, 1.1).addScaledVector(carForward, leadDistance);
-  const desiredPosition = cameraState.desiredPosition
-    .copy(playerCar.visual.position)
-    .addScaledVector(carForward, -chaseDistance)
-    .addScaledVector(cameraUp, cameraHeight)
-    .addScaledVector(carRight, lateralOffset);
-
-  const cameraContact = arenaContactForPoint(desiredPosition);
-  if (cameraContact.distance < 0.85) desiredPosition.addScaledVector(cameraContact.normal, 0.85 - cameraContact.distance);
-
-  const cameraObstructionOrigin = cameraState.obstructionOrigin.copy(playerCar.visual.position).addScaledVector(cameraUp, 1.25);
-  desiredPosition.copy(resolveCameraPosition(cameraObstructionOrigin, desiredPosition, cameraUp, carRight));
-
-  cameraState.position.lerp(desiredPosition, 1 - Math.exp(-dt * 6));
-  cameraState.target.lerp(desiredTarget, 1 - Math.exp(-dt * 8));
+  cameraState.position.copy(countdownCameraStart).lerp(countdownCameraEnd, descentT);
+  cameraState.target.copy(countdownCameraTargetStart).lerp(countdownCameraTargetEnd, flipEase);
+  keepCameraInsideArena(cameraState.position, 0.45);
   camera.position.copy(cameraState.position);
   camera.lookAt(cameraState.target);
+  cameraState.followForward.copy(rawForward);
+  cameraState.followUp.copy(rawUp);
+  cameraState.followRight.copy(rawRight);
+}
 
+function updateHud() {
   const speedMph = Math.abs(playerCar.vehicle.currentVehicleSpeedKmHour) * 0.621371;
   const speedText = String(Math.round(speedMph)).padStart(3, "0");
   if (hudCache.speedText !== speedText) {
@@ -2647,6 +2956,67 @@ function syncVisuals(dt, interpolationAlpha) {
     boostValueEl.textContent = boostValueText;
   }
   updateLeaderboard();
+}
+
+function syncVisuals(dt, interpolationAlpha) {
+  const visualTime = performance.now();
+  for (const car of gameState.cars) syncCarVisual(car, interpolationAlpha, visualTime);
+  if (globalWheelVisuals) {
+    globalWheelVisuals.tires.instanceMatrix.needsUpdate = true;
+    globalWheelVisuals.rims.instanceMatrix.needsUpdate = true;
+  }
+
+  if (gameState.phase === "countdown") {
+    syncCountdownCamera();
+    updateHud();
+    return;
+  }
+
+  const rawForward = cameraRawForward.set(0, 0, 1).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const rawUp = cameraRawUp.set(0, 1, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const rawRight = cameraRawRight.set(1, 0, 0).applyQuaternion(playerCar.visual.quaternion).normalize();
+  const grounded = playerCar.vehicle.numWheelsOnGround > 0;
+  const stableForCamera = grounded && rawUp.dot(upAxis) > 0.35;
+  if (stableForCamera) {
+    cameraState.followForward.copy(rawForward);
+    cameraState.followUp.copy(rawUp);
+    cameraState.followRight.copy(rawRight);
+  }
+
+  const carForward = stableForCamera ? rawForward : cameraState.followForward;
+  const carUp = stableForCamera ? rawUp : cameraState.followUp;
+  const carRight = stableForCamera ? rawRight : cameraState.followRight;
+  const cameraUpBias = stableForCamera ? 0.55 : 0.96;
+  const cameraUp = cameraResolvedUp.copy(carUp).lerp(upAxis, cameraUpBias).normalize();
+  const leadDistance = stableForCamera ? 4.0 : 2.2;
+  const chaseDistance = stableForCamera ? 12.5 : 15.5;
+  const cameraHeight = stableForCamera ? 5.8 : 8.2;
+  const lateralOffset = stableForCamera ? -playerCar.input.steer * 1.2 : 0;
+
+  const desiredTarget = cameraState.desiredTarget.copy(playerCar.visual.position).addScaledVector(cameraUp, 1.1).addScaledVector(carForward, leadDistance);
+  const desiredPosition = cameraState.desiredPosition
+    .copy(playerCar.visual.position)
+    .addScaledVector(carForward, -chaseDistance)
+    .addScaledVector(cameraUp, cameraHeight)
+    .addScaledVector(carRight, lateralOffset);
+
+  keepCameraInsideArena(desiredPosition, 1.15);
+
+  const cameraObstructionOrigin = cameraState.obstructionOrigin.copy(playerCar.visual.position).addScaledVector(cameraUp, 1.25);
+  desiredPosition.copy(resolveCameraPosition(cameraObstructionOrigin, desiredPosition, cameraUp, carRight));
+
+  cameraState.position.lerp(desiredPosition, 1 - Math.exp(-dt * 7.5));
+  cameraState.target.lerp(desiredTarget, 1 - Math.exp(-dt * 8.5));
+  if (cameraState.position.distanceTo(cameraState.target) < 7.5) {
+    cameraSafeOffset.copy(cameraState.position).sub(cameraState.target);
+    if (cameraSafeOffset.lengthSq() < 0.001) cameraSafeOffset.copy(carForward).multiplyScalar(-1).addScaledVector(cameraUp, 0.35);
+    cameraState.position.copy(cameraState.target).addScaledVector(cameraSafeOffset.normalize(), 7.5);
+    keepCameraInsideArena(cameraState.position, 1.15);
+  }
+  camera.position.copy(cameraState.position);
+  camera.lookAt(cameraState.target);
+
+  updateHud();
 }
 
 window.__arenaCarDebug = {
@@ -2687,15 +3057,12 @@ window.__arenaCarDebug = {
         velocity: [car.body.velocity.x, car.body.velocity.y, car.body.velocity.z],
         wheelsOnGround: car.vehicle.numWheelsOnGround,
         surfaceContactGrace: car.surfaceContactGrace,
-        surfaceContactTime: car.surfaceContactTime,
-        sideRecoveryTime: car.sideRecoveryTime,
+        stabilityAssist: car.stabilityAssist,
         input: { throttle: car.input.throttle, steer: car.input.steer, boostQueued: car.input.boostQueued },
         ai: car.isPlayer ? null : {
           stuckTimer: car.ai.stuckTimer,
           unstickTimer: car.ai.unstickTimer,
           reverseTimer: car.ai.reverseTimer,
-          rightingTimer: car.ai.rightingTimer,
-          recoveryCandidateTimer: car.ai.recoveryCandidateTimer,
           targetId: car.ai.targetId,
         },
         quaternion: [car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w],
@@ -2788,6 +3155,7 @@ function animate(time) {
     physics.step(fixedStep);
     processPhysicsContacts();
     for (const car of gameState.cars) applyQueuedJump(car);
+    updateCountdown(fixedStep);
     updateRound(fixedStep);
     accumulator -= fixedStep;
   }
