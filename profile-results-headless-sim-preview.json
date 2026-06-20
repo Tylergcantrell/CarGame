@@ -1,0 +1,900 @@
+[
+  {
+    "scenario": {
+      "name": "orange-1",
+      "arena": "orange",
+      "playerCount": 1
+    },
+    "bare": {
+      "wallMs": 1648.5,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 36.39672429481347
+    },
+    "perf": {
+      "fps": 1.6214025131738954,
+      "avgFrameMs": 2.300000011920929,
+      "avgSimMs": 0,
+      "avgRenderMs": 1.949999988079071,
+      "avgSteps": 0,
+      "maxFrameMs": 73.40000009536743,
+      "maxSimMs": 0,
+      "maxRenderMs": 73.20000004768372,
+      "pixelRatio": 1,
+      "calls": 38,
+      "triangles": 5700,
+      "geometries": 39,
+      "textures": 1,
+      "bodies": 2,
+      "contacts": 0
+    },
+    "wallMs": 1097.8999999761581,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 54.64978595619178,
+    "profile": {
+      "elapsedMs": 1098.2000000476837,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 3278.091422185111,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 1.799999713897705,
+          "avgMs": 0.0004999999205271403,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.6390454505732557,
+          "msPerStep": 0.0004999999205271403
+        },
+        "drive": {
+          "count": 3600,
+          "totalMs": 1.8000000715255737,
+          "avgMs": 0.0005000000198682149,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.6390457762223802,
+          "msPerStep": 0.0005000000198682149
+        },
+        "airControl": {
+          "count": 3600,
+          "totalMs": 11.100000143051147,
+          "avgMs": 0.003083333373069763,
+          "maxMs": 0.40000009536743164,
+          "msPerSecond": 10.107448681997075,
+          "msPerStep": 0.003083333373069763
+        },
+        "boost": {
+          "count": 3600,
+          "totalMs": 2.300000309944153,
+          "avgMs": 0.0006388889749844869,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.094336468625284,
+          "msPerStep": 0.0006388889749844869
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 1045.2999995946884,
+          "avgMs": 0.2903611109985246,
+          "maxMs": 69.70000004768372,
+          "msPerSecond": 951.830267300402,
+          "msPerStep": 0.2903611109985246
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 3.000000238418579,
+          "avgMs": 0.0008333333995607164,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.7317430689203417,
+          "msPerStep": 0.0008333333995607164
+        },
+        "jump": {
+          "count": 3600,
+          "totalMs": 2.4000000953674316,
+          "avgMs": 0.0006666666931576198,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 2.1853943682965067,
+          "msPerStep": 0.0006666666931576198
+        },
+        "righting": {
+          "count": 3600,
+          "totalMs": 2.0999996662139893,
+          "avgMs": 0.000583333240614997,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.9122196923354648,
+          "msPerStep": 0.000583333240614997
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 1.7000000476837158,
+          "avgMs": 0.00047222223546769884,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.547987659451741,
+          "msPerStep": 0.00047222223546769884
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.20000004768371582,
+          "p95": 0.3999999761581421,
+          "p99": 0.6000000238418579,
+          "max": 69.70000004768372
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.20000004768371582,
+          "p95": 0.40000009536743164,
+          "p99": 0.6000000238418579,
+          "max": 69.80000007152557
+        }
+      },
+      "raycasts": {
+        "count": 14400,
+        "totalMs": 90.00000047683716,
+        "avgMs": 0.006250000033113692,
+        "perStep": 4,
+        "byPhase": {
+          "physicsStep": {
+            "count": 14400,
+            "totalMs": 90.00000047683716,
+            "avgMs": 0.006250000033113692,
+            "perStep": 4
+          }
+        }
+      }
+    }
+  },
+  {
+    "scenario": {
+      "name": "orange-4",
+      "arena": "orange",
+      "playerCount": 4
+    },
+    "bare": {
+      "wallMs": 2743.1999999284744,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 21.87226596732445
+    },
+    "perf": {
+      "fps": 0.7726781023096979,
+      "avgFrameMs": 3.850000023841858,
+      "avgSimMs": 0,
+      "avgRenderMs": 3.5,
+      "avgSteps": 0,
+      "maxFrameMs": 0,
+      "maxSimMs": 0,
+      "maxRenderMs": 0,
+      "pixelRatio": 1,
+      "calls": 60,
+      "triangles": 13350,
+      "geometries": 74,
+      "textures": 1,
+      "bodies": 5,
+      "contacts": 0
+    },
+    "wallMs": 2504.1999999284744,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 23.959747624676037,
+    "profile": {
+      "elapsedMs": 2504.2999999523163,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 1437.527452808588,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 1.3000000715255737,
+          "avgMs": 0.000361111130979326,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 0.5191071642975389,
+          "msPerStep": 0.000361111130979326
+        },
+        "ai": {
+          "count": 10800,
+          "totalMs": 12.700000047683716,
+          "avgMs": 0.0011759259303410847,
+          "maxMs": 0.2999999523162842,
+          "msPerSecond": 5.071277422004365,
+          "msPerStep": 0.0035277777910232544
+        },
+        "drive": {
+          "count": 14400,
+          "totalMs": 6.999999523162842,
+          "avgMs": 0.00048611107799741957,
+          "maxMs": 0.30000007152557373,
+          "msPerSecond": 2.7951920789426694,
+          "msPerStep": 0.0019444443119896783
+        },
+        "airControl": {
+          "count": 14400,
+          "totalMs": 17.999999046325684,
+          "avgMs": 0.0012499999337726169,
+          "maxMs": 0.3999999761581421,
+          "msPerSecond": 7.1876368832282145,
+          "msPerStep": 0.004999999735090467
+        },
+        "boost": {
+          "count": 14400,
+          "totalMs": 11.9000004529953,
+          "avgMs": 0.0008263889203468959,
+          "maxMs": 3.600000023841858,
+          "msPerSecond": 4.751827038782049,
+          "msPerStep": 0.0033055556813875835
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 2376.400001168251,
+          "avgMs": 0.6601111114356253,
+          "maxMs": 14.800000071525574,
+          "msPerSecond": 948.9278445927004,
+          "msPerStep": 0.6601111114356253
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 5.299999833106995,
+          "avgMs": 0.001472222175863054,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.116359794436733,
+          "msPerStep": 0.001472222175863054
+        },
+        "jump": {
+          "count": 14400,
+          "totalMs": 5.700000166893005,
+          "avgMs": 0.0003958333449231254,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.2760852002561744,
+          "msPerStep": 0.0015833333796925015
+        },
+        "righting": {
+          "count": 14400,
+          "totalMs": 6.099999666213989,
+          "avgMs": 0.00042361108793152703,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 2.435810272862731,
+          "msPerStep": 0.0016944443517261081
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 2.300000309944153,
+          "avgMs": 0.0006388889749844869,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.9184204408369391,
+          "msPerStep": 0.0006388889749844869
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.5,
+          "p95": 1.399999976158142,
+          "p99": 1.799999953508377,
+          "max": 14.800000071525574
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.6000000238418579,
+          "p95": 1.5,
+          "p99": 1.899999976158142,
+          "max": 14.800000071525574
+        }
+      },
+      "raycasts": {
+        "count": 57600,
+        "totalMs": 167.20000207424164,
+        "avgMs": 0.0029027778137889174,
+        "perStep": 16,
+        "byPhase": {
+          "physicsStep": {
+            "count": 57600,
+            "totalMs": 167.20000207424164,
+            "avgMs": 0.0029027778137889174,
+            "perStep": 16
+          }
+        }
+      }
+    }
+  },
+  {
+    "scenario": {
+      "name": "orange-8",
+      "arena": "orange",
+      "playerCount": 8
+    },
+    "bare": {
+      "wallMs": 4042.1999999284744,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 14.84340210802575
+    },
+    "perf": {
+      "fps": 0.5719678553987264,
+      "avgFrameMs": 2.449999988079071,
+      "avgSimMs": 0,
+      "avgRenderMs": 2.149999976158142,
+      "avgSteps": 0,
+      "maxFrameMs": 0,
+      "maxSimMs": 0,
+      "maxRenderMs": 0,
+      "pixelRatio": 1,
+      "calls": 127,
+      "triangles": 17676,
+      "geometries": 165,
+      "textures": 1,
+      "bodies": 9,
+      "contacts": 6
+    },
+    "wallMs": 3399.2000000476837,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 17.65121204964648,
+    "profile": {
+      "elapsedMs": 3399.3000000715256,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 1059.041567359236,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 0.8999998569488525,
+          "avgMs": 0.00024999996026357015,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.2647603497572781,
+          "msPerStep": 0.00024999996026357015
+        },
+        "ai": {
+          "count": 25200,
+          "totalMs": 22.100000500679016,
+          "avgMs": 0.000876984146852342,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 6.501338658021947,
+          "msPerStep": 0.006138889027966394
+        },
+        "drive": {
+          "count": 28800,
+          "totalMs": 7.600000500679016,
+          "avgMs": 0.00026388890627357695,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.235754567269468,
+          "msPerStep": 0.0021111112501886156
+        },
+        "airControl": {
+          "count": 28800,
+          "totalMs": 17.999999165534973,
+          "avgMs": 0.0006249999710255199,
+          "maxMs": 0.2999999523162842,
+          "msPerSecond": 5.2952075913147505,
+          "msPerStep": 0.004999999768204159
+        },
+        "boost": {
+          "count": 28800,
+          "totalMs": 8.000000596046448,
+          "avgMs": 0.000277777798473835,
+          "maxMs": 0.30000007152557373,
+          "msPerSecond": 2.353425880586626,
+          "msPerStep": 0.00222222238779068
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 3263.7999984025955,
+          "avgMs": 0.9066111106673876,
+          "maxMs": 14,
+          "msPerSecond": 960.1388516264882,
+          "msPerStep": 0.9066111106673876
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 3.000000238418579,
+          "avgMs": 0.0008333333995607164,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.8825347096035816,
+          "msPerStep": 0.0008333333995607164
+        },
+        "jump": {
+          "count": 28800,
+          "totalMs": 7.600000262260437,
+          "avgMs": 0.0002638888979951541,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.235754497131916,
+          "msPerStep": 0.0021111111839612327
+        },
+        "righting": {
+          "count": 28800,
+          "totalMs": 8.800000309944153,
+          "avgMs": 0.0003055555663175053,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.5887683669458386,
+          "msPerStep": 0.0024444445305400425
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 0.7999999523162842,
+          "avgMs": 0.0002222222089767456,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.23534255649676436,
+          "msPerStep": 0.0002222222089767456
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.8999999761581421,
+          "p95": 1.5,
+          "p99": 2,
+          "max": 14
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.8999999761581421,
+          "p95": 1.600000023841858,
+          "p99": 2.100000023841858,
+          "max": 14.200000047683716
+        }
+      },
+      "raycasts": {
+        "count": 115200,
+        "totalMs": 212.19999969005585,
+        "avgMs": 0.0018420138861984015,
+        "perStep": 32,
+        "byPhase": {
+          "physicsStep": {
+            "count": 115200,
+            "totalMs": 212.19999969005585,
+            "avgMs": 0.0018420138861984015,
+            "perStep": 32
+          }
+        }
+      }
+    }
+  },
+  {
+    "scenario": {
+      "name": "blue-8",
+      "arena": "blue",
+      "playerCount": 8
+    },
+    "bare": {
+      "wallMs": 3180.9000000953674,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 18.86258605998338
+    },
+    "perf": {
+      "fps": 0.603664241944284,
+      "avgFrameMs": 1.449999988079071,
+      "avgSimMs": 0,
+      "avgRenderMs": 1.149999976158142,
+      "avgSteps": 0,
+      "maxFrameMs": 0,
+      "maxSimMs": 0,
+      "maxRenderMs": 0,
+      "pixelRatio": 1,
+      "calls": 53,
+      "triangles": 8448,
+      "geometries": 231,
+      "textures": 1,
+      "bodies": 9,
+      "contacts": 0
+    },
+    "wallMs": 3206.7999999523163,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 18.710240738709047,
+    "profile": {
+      "elapsedMs": 3206.7999999523163,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 1122.6144443225428,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 0.8999999761581421,
+          "avgMs": 0.0002499999933772617,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.280653603645854,
+          "msPerStep": 0.0002499999933772617
+        },
+        "ai": {
+          "count": 25200,
+          "totalMs": 15.700000882148743,
+          "avgMs": 0.0006230159080217755,
+          "maxMs": 0.30000007152557373,
+          "msPerSecond": 4.89584660171579,
+          "msPerStep": 0.004361111356152429
+        },
+        "drive": {
+          "count": 28800,
+          "totalMs": 8.200000286102295,
+          "avgMs": 0.0002847222321563297,
+          "maxMs": 0.2999999523162842,
+          "msPerSecond": 2.5570663235076165,
+          "msPerStep": 0.0022777778572506376
+        },
+        "airControl": {
+          "count": 28800,
+          "totalMs": 15.700000643730164,
+          "avgMs": 0.0005451389112406307,
+          "maxMs": 0.30000007152557373,
+          "msPerSecond": 4.895846527367973,
+          "msPerStep": 0.004361111289925046
+        },
+        "boost": {
+          "count": 28800,
+          "totalMs": 6.299999952316284,
+          "avgMs": 0.00021874999834431544,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.9645752626948867,
+          "msPerStep": 0.0017499999867545235
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 3095.599999189377,
+          "avgMs": 0.8598888886637158,
+          "maxMs": 14.200000047683716,
+          "msPerSecond": 965.3236869263462,
+          "msPerStep": 0.8598888886637158
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 2.1999998092651367,
+          "avgMs": 0.0006111110581292047,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 0.6860421009410783,
+          "msPerStep": 0.0006111110581292047
+        },
+        "jump": {
+          "count": 28800,
+          "totalMs": 7.1000001430511475,
+          "avgMs": 0.0002465277827448315,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.2140451986892606,
+          "msPerStep": 0.001972222261958652
+        },
+        "righting": {
+          "count": 28800,
+          "totalMs": 6.699999809265137,
+          "avgMs": 0.0002326388822661506,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.089310156344257,
+          "msPerStep": 0.0018611110581292047
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 2.0000001192092896,
+          "avgMs": 0.0005555555886692471,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.62367472846421,
+          "msPerStep": 0.0005555555886692471
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.8000000715255737,
+          "p95": 1.399999976158142,
+          "p99": 1.9010000944137337,
+          "max": 14.200000047683716
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.8000000715255737,
+          "p95": 1.4000000953674316,
+          "p99": 2,
+          "max": 14.399999976158142
+        }
+      },
+      "raycasts": {
+        "count": 115200,
+        "totalMs": 138.60000276565552,
+        "avgMs": 0.0012031250240074265,
+        "perStep": 32,
+        "byPhase": {
+          "physicsStep": {
+            "count": 115200,
+            "totalMs": 138.60000276565552,
+            "avgMs": 0.0012031250240074265,
+            "perStep": 32
+          }
+        }
+      }
+    }
+  },
+  {
+    "scenario": {
+      "name": "purple-8",
+      "arena": "purple",
+      "playerCount": 8
+    },
+    "bare": {
+      "wallMs": 3084.2999999523163,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 19.45336056833888
+    },
+    "perf": {
+      "fps": 0.5703530485331665,
+      "avgFrameMs": 0.8500000238418579,
+      "avgSimMs": 0,
+      "avgRenderMs": 0.6500000357627869,
+      "avgSteps": 0,
+      "maxFrameMs": 0,
+      "maxSimMs": 0,
+      "maxRenderMs": 0,
+      "pixelRatio": 1,
+      "calls": 41,
+      "triangles": 8204,
+      "geometries": 279,
+      "textures": 1,
+      "bodies": 9,
+      "contacts": 0
+    },
+    "wallMs": 3412,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 17.584994138335286,
+    "profile": {
+      "elapsedMs": 3412,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 1055.0996483001172,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 1.799999713897705,
+          "avgMs": 0.0004999999205271403,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.5275497402982723,
+          "msPerStep": 0.0004999999205271403
+        },
+        "ai": {
+          "count": 25200,
+          "totalMs": 13.09999966621399,
+          "avgMs": 0.0005198412565957933,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 3.839390289042787,
+          "msPerStep": 0.0036388887961705525
+        },
+        "drive": {
+          "count": 28800,
+          "totalMs": 7.499999284744263,
+          "avgMs": 0.000260416641831398,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.198124057662445,
+          "msPerStep": 0.002083333134651184
+        },
+        "airControl": {
+          "count": 28800,
+          "totalMs": 18.399999141693115,
+          "avgMs": 0.0006388888590865665,
+          "maxMs": 1.7000000476837158,
+          "msPerSecond": 5.392731284200796,
+          "msPerStep": 0.005111110872692532
+        },
+        "boost": {
+          "count": 28800,
+          "totalMs": 7.199999809265137,
+          "avgMs": 0.0002499999933772617,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 2.1101992406990435,
+          "msPerStep": 0.0019999999470180934
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 3296.400002360344,
+          "avgMs": 0.9156666673223177,
+          "maxMs": 13.600000023841858,
+          "msPerSecond": 966.1195786519179,
+          "msPerStep": 0.9156666673223177
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 3.0999999046325684,
+          "avgMs": 0.0008611110846201579,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.908558002530061,
+          "msPerStep": 0.0008611110846201579
+        },
+        "jump": {
+          "count": 28800,
+          "totalMs": 6.399999499320984,
+          "avgMs": 0.00022222220483753417,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 1.8757325613484712,
+          "msPerStep": 0.0017777776387002734
+        },
+        "righting": {
+          "count": 28800,
+          "totalMs": 8.700000643730164,
+          "avgMs": 0.0003020833556850751,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 2.549824338725136,
+          "msPerStep": 0.002416666845480601
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 1.5999995470046997,
+          "avgMs": 0.00044444431861241656,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.468933044256946,
+          "msPerStep": 0.00044444431861241656
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.8000000715255737,
+          "p95": 1.600000023841858,
+          "p99": 2.1999999296665194,
+          "max": 13.600000023841858
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.8999999761581421,
+          "p95": 1.6999999284744263,
+          "p99": 2.2010000467300177,
+          "max": 13.600000023841858
+        }
+      },
+      "raycasts": {
+        "count": 115200,
+        "totalMs": 127.7999997138977,
+        "avgMs": 0.001109374997516473,
+        "perStep": 32,
+        "byPhase": {
+          "physicsStep": {
+            "count": 115200,
+            "totalMs": 127.7999997138977,
+            "avgMs": 0.001109374997516473,
+            "perStep": 32
+          }
+        }
+      }
+    }
+  },
+  {
+    "scenario": {
+      "name": "green-8",
+      "arena": "green",
+      "playerCount": 8
+    },
+    "bare": {
+      "wallMs": 3631.7000000476837,
+      "simulatedSeconds": 60,
+      "realtimeMultiplier": 16.52118842393706
+    },
+    "perf": {
+      "fps": 0.544069640914037,
+      "avgFrameMs": 2.399999976158142,
+      "avgSimMs": 0,
+      "avgRenderMs": 2.050000011920929,
+      "avgSteps": 0,
+      "maxFrameMs": 0,
+      "maxSimMs": 0,
+      "maxRenderMs": 0,
+      "pixelRatio": 1,
+      "calls": 77,
+      "triangles": 23498,
+      "geometries": 336,
+      "textures": 1,
+      "bodies": 9,
+      "contacts": 13
+    },
+    "wallMs": 3576.8000000715256,
+    "simulatedSeconds": 60,
+    "realtimeMultiplier": 16.774770744464373,
+    "profile": {
+      "elapsedMs": 3576.8000000715256,
+      "frames": 0,
+      "steps": 3600,
+      "cappedFrames": 0,
+      "stepsPerSecond": 1006.4862446678624,
+      "buckets": {
+        "input": {
+          "count": 3600,
+          "totalMs": 2.199999690055847,
+          "avgMs": 0.0006111110250155131,
+          "maxMs": 0.3999999761581421,
+          "msPerSecond": 0.6150748406429919,
+          "msPerStep": 0.0006111110250155131
+        },
+        "ai": {
+          "count": 25200,
+          "totalMs": 15.69999873638153,
+          "avgMs": 0.000623015822872283,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 4.389397991519676,
+          "msPerStep": 0.00436111076010598
+        },
+        "drive": {
+          "count": 28800,
+          "totalMs": 8.599999785423279,
+          "avgMs": 0.0002986111036605305,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 2.4043837467153053,
+          "msPerStep": 0.002388888829284244
+        },
+        "airControl": {
+          "count": 28800,
+          "totalMs": 18.100000262260437,
+          "avgMs": 0.0006284722313284874,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 5.060389247902732,
+          "msPerStep": 0.0050277778506278995
+        },
+        "boost": {
+          "count": 28800,
+          "totalMs": 8.399999856948853,
+          "avgMs": 0.00029166666169961296,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 2.3484678642308423,
+          "msPerStep": 0.0023333332935969037
+        },
+        "physicsStep": {
+          "count": 3600,
+          "totalMs": 3445.700001001358,
+          "avgMs": 0.9571388891670439,
+          "maxMs": 9.5,
+          "msPerSecond": 963.3471261833074,
+          "msPerStep": 0.9571388891670439
+        },
+        "contacts": {
+          "count": 3600,
+          "totalMs": 2.6999998092651367,
+          "avgMs": 0.0007499999470180935,
+          "maxMs": 0.10000002384185791,
+          "msPerSecond": 0.7548646301753368,
+          "msPerStep": 0.0007499999470180935
+        },
+        "jump": {
+          "count": 28800,
+          "totalMs": 8.600000023841858,
+          "avgMs": 0.0002986111119389534,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 2.4043838133722555,
+          "msPerStep": 0.002388888895511627
+        },
+        "righting": {
+          "count": 28800,
+          "totalMs": 8.800000429153442,
+          "avgMs": 0.00030555557045671675,
+          "maxMs": 0.19999992847442627,
+          "msPerSecond": 2.4602998291706184,
+          "msPerStep": 0.002444444563653734
+        },
+        "round": {
+          "count": 3600,
+          "totalMs": 1.5999999046325684,
+          "avgMs": 0.0004444444179534912,
+          "maxMs": 0.20000004768371582,
+          "msPerSecond": 0.4473271931896033,
+          "msPerStep": 0.0004444444179534912
+        }
+      },
+      "samples": {
+        "physicsStepMs": {
+          "count": 3600,
+          "p50": 0.8999999761581421,
+          "p95": 1.5,
+          "p99": 2,
+          "max": 9.5
+        },
+        "stepMs": {
+          "count": 3600,
+          "p50": 0.9000000953674316,
+          "p95": 1.600000023841858,
+          "p99": 2.100000023841858,
+          "max": 9.5
+        }
+      },
+      "raycasts": {
+        "count": 115200,
+        "totalMs": 172.799999833107,
+        "avgMs": 0.001499999998551276,
+        "perStep": 32,
+        "byPhase": {
+          "physicsStep": {
+            "count": 115200,
+            "totalMs": 172.799999833107,
+            "avgMs": 0.001499999998551276,
+            "perStep": 32
+          }
+        }
+      }
+    }
+  }
+]

@@ -73,14 +73,14 @@ export const vehicleTuning = {
 };
 
 export const carPalette = [
-  { name: "red", hex: 0xe0182d, css: "#e0182d" },
-  { name: "teal", hex: 0x2fd8c4, css: "#2fd8c4" },
-  { name: "gold", hex: 0xffc247, css: "#ffc247" },
-  { name: "blue", hex: 0x4f8cff, css: "#4f8cff" },
-  { name: "purple", hex: 0xb86cff, css: "#b86cff" },
-  { name: "green", hex: 0x9fe44d, css: "#9fe44d" },
-  { name: "orange", hex: 0xff7a2f, css: "#ff7a2f" },
-  { name: "pink", hex: 0xff6fd8, css: "#ff6fd8" },
+  { name: "red", hex: 0xb80028, css: "#b80028" },
+  { name: "teal", hex: 0x009b96, css: "#009b96" },
+  { name: "gold", hex: 0xc98518, css: "#c98518" },
+  { name: "blue", hex: 0x2458d9, css: "#2458d9" },
+  { name: "purple", hex: 0x5e32c8, css: "#5e32c8" },
+  { name: "green", hex: 0x4fa832, css: "#4fa832" },
+  { name: "orange", hex: 0xd8521c, css: "#d8521c" },
+  { name: "pink", hex: 0xd13aa8, css: "#d13aa8" },
 ];
 
 export const spawnHeight = 1.08;
