@@ -18,6 +18,50 @@
           <div class="brand-block">
             <p class="eyebrow">Match Setup</p>
           </div>
+          <div class="mode-switch" role="group" aria-label="Game mode">
+            <button class="mode-button active" id="mode-solo" type="button">Solo</button>
+            <button class="mode-button" id="mode-multiplayer" type="button">Multiplayer</button>
+          </div>
+          <div class="multiplayer-panel hidden" id="multiplayer-panel">
+            <div class="multiplayer-head">
+              <div>
+                <strong id="multiplayer-title">Online Rooms</strong>
+                <span id="multiplayer-subtitle">Public rooms are listed below. Private rooms use a code.</span>
+              </div>
+              <div class="connection-pill" id="connection-pill">Local Server</div>
+            </div>
+            <div class="connection-row">
+              <label id="name-field">
+                <span>Name</span>
+                <input id="multiplayer-name" type="text" maxlength="18" autocomplete="off" />
+              </label>
+              <label id="server-field">
+                <span>Server</span>
+                <input id="server-url" type="text" autocomplete="off" />
+              </label>
+              <label id="room-code-field">
+                <span>Room</span>
+                <input id="room-code" type="text" maxlength="6" autocomplete="off" />
+              </label>
+              <button class="secondary-action" id="connect-server" type="button">Leave Room</button>
+            </div>
+            <div class="room-actions" id="room-actions">
+              <label>
+                <span>Visibility</span>
+                <select id="room-visibility">
+                  <option value="public" selected>Public</option>
+                  <option value="private">Private</option>
+                </select>
+              </label>
+              <button class="secondary-action" id="create-room" type="button">Create Room</button>
+              <button class="secondary-action" id="join-room" type="button">Join Code</button>
+              <button class="secondary-action" id="refresh-rooms" type="button">Refresh Rooms</button>
+            </div>
+            <div class="lobby-status" id="lobby-status">Not connected</div>
+            <div class="room-browser" id="room-browser"></div>
+            <div class="room-summary hidden" id="room-summary"></div>
+            <div class="lobby-list" id="lobby-list"></div>
+          </div>
           <div class="menu-grid">
             <label>
               <span>Round Time</span>
@@ -66,6 +110,19 @@
         <h1>Results</h1>
         <ol class="results-list" id="results-list"></ol>
         <button class="primary-action" id="play-again" type="button">Play Again</button>
+      </div>
+    </section>
+
+    <section class="pause-screen hidden" id="pause-screen" aria-modal="true" role="dialog">
+      <div class="pause-panel">
+        <p class="eyebrow" id="pause-eyebrow">Paused</p>
+        <h2 id="pause-title">Game Paused</h2>
+        <p id="pause-copy">Solo play is paused.</p>
+        <div class="pause-actions">
+          <button class="primary-action" id="resume-game" type="button">Resume</button>
+          <button class="secondary-action" id="pause-menu" type="button">Menu</button>
+          <button class="secondary-action hidden" id="pause-disconnect" type="button">Disconnect</button>
+        </div>
       </div>
     </section>
 

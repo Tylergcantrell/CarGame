@@ -1,11 +1,11 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
-import { pickWaypoint, updateAiCar } from "./ai.js";
+import { pickWaypoint, updateAiCar } from "../server/shared/ai.js";
 import {
   arenaDefinitions,
   worldSpec,
-} from "./arena.js";
+} from "../server/shared/arena.js";
 import {
   clampPlayerInput,
   input,
@@ -13,7 +13,14 @@ import {
   keyboardAxes,
   touchInput,
 } from "./input.js";
-import { createPhysicsWorld } from "./physics.js";
+import { createPhysicsWorld } from "../server/shared/physics.js";
+import {
+  createSimState as createSharedCannonSimState,
+  makeSnapshot as makeSharedCannonSnapshot,
+  mergeInput as mergeSharedCannonInput,
+  tickSim as tickSharedCannonSim,
+} from "../server/shared/cannon-multiplayer-sim.js";
+import { protocolVersion } from "../server/shared/protocol.js";
 import {
   carPalette,
   rearWheelOptions,
@@ -22,7 +29,7 @@ import {
   vehicleTuning,
   wheelOptions,
   wheelPositions,
-} from "./vehicle-config.js";
+} from "../server/shared/vehicle-config.js";
 import galaxySkyboxUrl from "./assets/sky/galaxy-skybox.webp";
 import "./styles.css";
 
@@ -67,11 +74,23 @@ const tmpVec3D = new THREE.Vector3();
 const tmpMatrix = new THREE.Matrix4();
 const tmpQuat = new THREE.Quaternion();
 const tmpQuatB = new THREE.Quaternion();
+const networkCurrentQuat = new THREE.Quaternion();
+const networkTargetQuat = new THREE.Quaternion();
+const networkSmoothedQuat = new THREE.Quaternion();
+const predictionCurrentQuat = new THREE.Quaternion();
+const predictionTargetQuat = new THREE.Quaternion();
+const predictionSmoothedQuat = new THREE.Quaternion();
+const localPredictionDeadZoneSq = 0.0025;
+const localPredictionSnapDistanceSq = 324;
+const localPredictionCorrection = 0.18;
+const localPredictionFastCorrection = 0.38;
 const carBodyVisualMatrix = new THREE.Matrix4();
 const wheelMatrix = new THREE.Matrix4();
 const wheelVisualPosition = new THREE.Vector3();
 const wheelVisualQuaternion = new THREE.Quaternion();
 const wheelVisualScale = new THREE.Vector3(1, 1, 1);
+const wheelSteerQuaternion = new THREE.Quaternion();
+const wheelSpinQuaternion = new THREE.Quaternion();
 const minWheelVisualSurfaceClearance = wheelOptions.radius + 0.02;
 const rightingClearanceOffset = new THREE.Vector3();
 const rightingSampleWorld = new THREE.Vector3();
@@ -128,6 +147,7 @@ const contactSurfaceNormal = new THREE.Vector3();
 const arenaWallPoint = new THREE.Vector3();
 const tagBursts = [];
 const minWheelSupportDot = -0.34;
+const maxInputSendIntervalMs = 1000 / 60;
 const collisionGroups = {
   arena: 1,
   car: 2,
@@ -2439,12 +2459,43 @@ const roundTimeSelect = document.querySelector("#round-time");
 const playerCountSelect = document.querySelector("#player-count");
 const arenaSelect = document.querySelector("#arena-select");
 const colorPickerEl = document.querySelector("#color-picker");
+const setupGridEl = document.querySelector(".menu-grid");
+const colorSectionEl = document.querySelector(".color-section");
+const modeSoloButton = document.querySelector("#mode-solo");
+const modeMultiplayerButton = document.querySelector("#mode-multiplayer");
+const multiplayerPanelEl = document.querySelector("#multiplayer-panel");
+const multiplayerTitleEl = document.querySelector("#multiplayer-title");
+const multiplayerSubtitleEl = document.querySelector("#multiplayer-subtitle");
+const connectionPillEl = document.querySelector("#connection-pill");
+const multiplayerNameInput = document.querySelector("#multiplayer-name");
+const serverUrlInput = document.querySelector("#server-url");
+const roomCodeInput = document.querySelector("#room-code");
+const nameFieldEl = document.querySelector("#name-field");
+const serverFieldEl = document.querySelector("#server-field");
+const roomCodeFieldEl = document.querySelector("#room-code-field");
+const connectServerButton = document.querySelector("#connect-server");
+const roomVisibilitySelect = document.querySelector("#room-visibility");
+const createRoomButton = document.querySelector("#create-room");
+const joinRoomButton = document.querySelector("#join-room");
+const refreshRoomsButton = document.querySelector("#refresh-rooms");
+const roomActionsEl = document.querySelector("#room-actions");
+const roomBrowserEl = document.querySelector("#room-browser");
+const roomSummaryEl = document.querySelector("#room-summary");
+const lobbyStatusEl = document.querySelector("#lobby-status");
+const lobbyListEl = document.querySelector("#lobby-list");
 const roundTimerEl = document.querySelector("#round-timer");
 const itBannerEl = document.querySelector("#it-banner");
 const leaderboardEl = document.querySelector("#leaderboard");
 const resultsListEl = document.querySelector("#results-list");
 const countdownEl = document.querySelector("#countdown");
 const countdownValueEl = document.querySelector("#countdown-value");
+const pauseScreenEl = document.querySelector("#pause-screen");
+const pauseEyebrowEl = document.querySelector("#pause-eyebrow");
+const pauseTitleEl = document.querySelector("#pause-title");
+const pauseCopyEl = document.querySelector("#pause-copy");
+const resumeGameButton = document.querySelector("#resume-game");
+const pauseMenuButton = document.querySelector("#pause-menu");
+const pauseDisconnectButton = document.querySelector("#pause-disconnect");
 
 installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl });
 
@@ -2459,11 +2510,65 @@ const gameState = {
   playerCount: 4,
   cars: [],
   aiCars: [],
+  networkCars: [],
+  networkCarByKey: new Map(),
+  sharedRound: null,
+  sharedSessionId: "solo",
   itCar: null,
   tagCooldown: 0,
   leaderboardDirty: true,
   lastLeaderboardRender: 0,
+  pausedFromPhase: null,
+  pauseMenuOpen: false,
 };
+
+const defaultServerUrl = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname || "127.0.0.1"}:8787`;
+const storedPlayerName = localStorage.getItem("carTagPlayerName") ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
+multiplayerNameInput.value = storedPlayerName;
+serverUrlInput.value = localStorage.getItem("carTagServerUrl") ?? defaultServerUrl;
+roomCodeInput.value = localStorage.getItem("carTagRoomCode") ?? "";
+roomVisibilitySelect.value = localStorage.getItem("carTagRoomVisibility") ?? "public";
+
+const multiplayerState = {
+  mode: "solo",
+  socket: null,
+  connected: false,
+  manualDisconnect: false,
+  reconnectAttempts: 0,
+  reconnectTimer: null,
+  lastConnectionOptions: null,
+  selfId: null,
+  sessionId: localStorage.getItem("carTagSessionId") ?? "",
+  roomCode: roomCodeInput.value,
+  roomVisibility: localStorage.getItem("carTagRoomVisibility") ?? "public",
+  controllerId: null,
+  phase: "lobby",
+  clients: [],
+  publicRooms: [],
+  lastRoomListRequestAt: 0,
+  settings: {
+    roundTime: 120,
+    carCount: 4,
+    arena: "orange",
+  },
+  round: null,
+  activeRoundId: null,
+  predictedRound: null,
+  lastStatusRender: 0,
+  lastInputSentAt: 0,
+  inputSequence: 0,
+  predictionInputHistory: [],
+  acknowledgedInputSequence: 0,
+  localServerSnapshot: null,
+  predictionStats: {
+    rebuilds: 0,
+    maxCorrection: 0,
+    lastCorrection: 0,
+    largeCorrections: 0,
+  },
+};
+
+let multiplayerReturnTimer = null;
 
 const hudCache = {
   speedText: "",
@@ -2689,6 +2794,8 @@ function createCar({ id, name, color, isPlayer = false }) {
     boostFlame,
     tagMarker,
     wheelVisuals,
+    visualWheelSpin: [0, 0, 0, 0],
+    visualWheelSteer: [0, 0, 0, 0],
     input: makeInputState(),
     activeInWorld: true,
     currentSteering: 0,
@@ -2888,6 +2995,7 @@ function processPhysicsContacts() {
       continue;
     }
     if (!carA || !carB || carA === carB) continue;
+    if (isMultiplayerRoundActive()) continue;
 
     resolveCarTagPair(carA, carB);
   }
@@ -2918,6 +3026,8 @@ function spawnCarAt(car, spawn) {
   car.surfaceContactCount = 0;
   car.manualRightingActive = false;
   car.manualRightingElapsed = 0;
+  if (car.visualWheelSpin) car.visualWheelSpin.fill(0);
+  if (car.visualWheelSteer) car.visualWheelSteer.fill(0);
   car.ai.stuckTimer = 0;
   car.ai.unstickTimer = 0;
   car.ai.targetId = null;
@@ -2985,15 +3095,1109 @@ function deactivateUnusedAiCars(activeCount) {
   for (let i = activeCount; i < aiCarPool.length; i += 1) deactivateCar(aiCarPool[i]);
 }
 
+function getColorByName(name) {
+  return carPalette.find((color) => color.name === name) ?? carPalette[0];
+}
+
+function getSlotKey(slot) {
+  return slot?.key ?? (slot?.sessionId ? `player:${slot.sessionId}` : slot?.clientId ? `player:${slot.clientId}` : slot?.id ?? null);
+}
+
+function multiplayerEnabled() {
+  return multiplayerState.mode === "multiplayer";
+}
+
+function getSelfClient() {
+  return multiplayerState.clients.find((client) => client.id === multiplayerState.selfId) ?? null;
+}
+
+function getControllerClient() {
+  return multiplayerState.clients.find((client) => client.id === multiplayerState.controllerId) ?? null;
+}
+
+function isRoomController() {
+  return multiplayerState.connected && multiplayerState.selfId === multiplayerState.controllerId;
+}
+
+function isInMultiplayerRoom() {
+  return multiplayerEnabled() &&
+    multiplayerState.connected &&
+    Boolean(multiplayerState.roomCode) &&
+    multiplayerState.clients.length > 0;
+}
+
+function isMultiplayerRoundActive() {
+  return multiplayerEnabled() && multiplayerState.connected && Boolean(multiplayerState.activeRoundId);
+}
+
+function activeSharedCannonRound() {
+  return multiplayerState.predictedRound ?? gameState.sharedRound;
+}
+
+function isSharedCannonRoundActive() {
+  return Boolean(activeSharedCannonRound()?.sim);
+}
+
+function nextSharedCannonClientTickNow(sharedRound) {
+  const minNow = Math.max(sharedRound.playStartsAt, sharedRound.sim?.lastTick ?? Date.now());
+  if (!Number.isFinite(sharedRound.clientTickNow)) sharedRound.clientTickNow = minNow;
+  sharedRound.clientTickNow = Math.max(minNow, sharedRound.clientTickNow + fixedStep * 1000);
+  return sharedRound.clientTickNow;
+}
+
+function cloneInputSnapshot(inputSnapshot = {}) {
+  return {
+    throttle: inputSnapshot.throttle ?? 0,
+    steer: inputSnapshot.steer ?? 0,
+    boost: Boolean(inputSnapshot.boost),
+    boostQueued: Boolean(inputSnapshot.boostQueued),
+    jumpQueued: Boolean(inputSnapshot.jumpQueued),
+  };
+}
+
+function recordPredictionInputSample(sharedRound, sessionId, tickNow) {
+  if (!multiplayerState.predictedRound || !sessionId || !sharedRound?.sim) return;
+  const inputSnapshot = cloneInputSnapshot(sharedRound.sim.inputs.get(sessionId));
+  multiplayerState.predictionInputHistory.push({
+    tickNow,
+    sequence: multiplayerState.inputSequence,
+    input: inputSnapshot,
+  });
+  const minTickNow = tickNow - 2500;
+  while (
+    multiplayerState.predictionInputHistory.length > 0 &&
+    multiplayerState.predictionInputHistory[0].tickNow < minTickNow
+  ) {
+    multiplayerState.predictionInputHistory.shift();
+  }
+}
+
+function sendServerMessage(payload) {
+  if (!multiplayerState.socket || multiplayerState.socket.readyState !== WebSocket.OPEN) return false;
+  multiplayerState.socket.send(JSON.stringify(payload));
+  return true;
+}
+
+function selectedRoomVisibility() {
+  return roomVisibilitySelect.value === "private" ? "private" : "public";
+}
+
+function currentPlayerName() {
+  return multiplayerNameInput.value.trim() || storedPlayerName;
+}
+
+function currentServerUrl() {
+  return serverUrlInput.value.trim() || defaultServerUrl;
+}
+
+function clearMultiplayerReconnectTimer() {
+  if (!multiplayerState.reconnectTimer) return;
+  clearTimeout(multiplayerState.reconnectTimer);
+  multiplayerState.reconnectTimer = null;
+}
+
+function scheduleMultiplayerReconnect(options = multiplayerState.lastConnectionOptions) {
+  if (!multiplayerEnabled() || multiplayerState.manualDisconnect || !options) return;
+  clearMultiplayerReconnectTimer();
+  multiplayerState.reconnectAttempts += 1;
+  const delay = Math.min(5000, 500 * (2 ** Math.min(4, multiplayerState.reconnectAttempts - 1)));
+  lobbyStatusEl.textContent = `Connection lost. Reconnecting in ${Math.ceil(delay / 1000)}s...`;
+  multiplayerState.reconnectTimer = setTimeout(() => {
+    multiplayerState.reconnectTimer = null;
+    if (!multiplayerEnabled() || multiplayerState.manualDisconnect || multiplayerState.connected) return;
+    connectMultiplayer({ ...options, reconnect: true });
+  }, delay);
+}
+
+function requestRoomList({ force = false } = {}) {
+  if (!multiplayerEnabled() || !multiplayerState.connected) return;
+  const now = performance.now();
+  if (!force && now - multiplayerState.lastRoomListRequestAt < 2000) return;
+  multiplayerState.lastRoomListRequestAt = now;
+  sendServerMessage({ type: "listRooms" });
+}
+
+function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selectedRoomVisibility() } = {}) {
+  const cleanRoomCode = String(roomCode ?? "").trim().toUpperCase();
+  const roomVisibility = visibility === "private" ? "private" : "public";
+  localStorage.setItem("carTagServerUrl", currentServerUrl());
+  localStorage.setItem("carTagPlayerName", currentPlayerName());
+  localStorage.setItem("carTagRoomVisibility", roomVisibility);
+  if (cleanRoomCode) localStorage.setItem("carTagRoomCode", cleanRoomCode);
+  roomVisibilitySelect.value = roomVisibility;
+
+  if (!multiplayerState.connected) {
+    multiplayerState.manualDisconnect = false;
+    connectMultiplayer({ roomCode: cleanRoomCode, visibility: roomVisibility });
+    return;
+  }
+
+  lobbyStatusEl.textContent = cleanRoomCode ? `Joining room ${cleanRoomCode}...` : "Creating room...";
+  sendServerMessage({
+    type: "joinRoom",
+    name: currentPlayerName(),
+    roomCode: cleanRoomCode,
+    visibility: roomVisibility,
+  });
+}
+
+function createRoomOnServer() {
+  joinRoomOnServer({ roomCode: "", visibility: selectedRoomVisibility() });
+}
+
+function joinCodeRoomOnServer() {
+  joinRoomOnServer({ roomCode: roomCodeInput.value, visibility: selectedRoomVisibility() });
+}
+
+function leaveCurrentRoom() {
+  if (!multiplayerState.connected) {
+    multiplayerState.manualDisconnect = false;
+    connectMultiplayer({ lobbyOnly: true });
+    return;
+  }
+  if (!isInMultiplayerRoom()) {
+    disconnectMultiplayer();
+    return;
+  }
+  clearTimeout(multiplayerReturnTimer);
+  multiplayerReturnTimer = null;
+  multiplayerState.roomCode = "";
+  multiplayerState.controllerId = null;
+  multiplayerState.clients = [];
+  multiplayerState.phase = "lobby";
+  multiplayerState.round = null;
+  multiplayerState.activeRoundId = null;
+  multiplayerState.lastConnectionOptions = { lobbyOnly: true, roomCode: "", visibility: selectedRoomVisibility() };
+  if (gameState.phase !== "menu") returnToMenu({ notifyServer: false });
+  sendServerMessage({ type: "leaveRoom" });
+  renderColorPicker();
+  renderMultiplayerLobby();
+}
+
+function renderRoomBrowser() {
+  if (!multiplayerEnabled()) return;
+  roomBrowserEl.innerHTML = "";
+  if (isInMultiplayerRoom()) return;
+  if (!multiplayerState.connected) {
+    const empty = document.createElement("div");
+    empty.className = "room-empty";
+    empty.textContent = "Connecting to multiplayer...";
+    roomBrowserEl.append(empty);
+    return;
+  }
+
+  const rooms = multiplayerState.publicRooms.filter((room) => room.code !== multiplayerState.roomCode);
+  if (!rooms.length) {
+    const empty = document.createElement("div");
+    empty.className = "room-empty";
+    empty.textContent = "No public rooms yet. Create one or join with a private code.";
+    roomBrowserEl.append(empty);
+    return;
+  }
+
+  for (const room of rooms) {
+    const row = document.createElement("div");
+    row.className = "room-row";
+    const main = document.createElement("div");
+    main.className = "room-main";
+    const title = document.createElement("strong");
+    title.textContent = room.phase === "round" ? `Room ${room.code} - playing` : `Room ${room.code} - waiting`;
+    const secondsLeft = room.roundEndsAt ? ` - ${formatTime((room.roundEndsAt - Date.now()) / 1000)} left` : "";
+    const detail = document.createElement("span");
+    detail.textContent = `${room.playerCount}/${room.maxPlayers} players - ${room.settings.carCount} cars${secondsLeft}`;
+    const join = document.createElement("button");
+    join.className = "secondary-action";
+    join.type = "button";
+    join.textContent = "Join";
+    join.disabled = room.playerCount >= room.maxPlayers;
+    join.addEventListener("click", () => joinRoomOnServer({ roomCode: room.code, visibility: "public" }));
+    main.append(title, detail);
+    row.append(main, join);
+    roomBrowserEl.append(row);
+  }
+}
+
+function appendRoomSummaryItem(label, value) {
+  const item = document.createElement("div");
+  item.className = "summary-item";
+  const labelEl = document.createElement("span");
+  labelEl.textContent = label;
+  const valueEl = document.createElement("strong");
+  valueEl.textContent = value;
+  item.append(labelEl, valueEl);
+  roomSummaryEl.append(item);
+}
+
+function renderRoomSummary() {
+  roomSummaryEl.innerHTML = "";
+  if (!isInMultiplayerRoom()) return;
+
+  const controller = getControllerClient();
+  const phaseLabel = multiplayerState.phase === "round" ? "In Round" : "Lobby";
+  const secondsLeft = multiplayerState.phase === "round" && multiplayerState.round
+    ? formatTime((multiplayerState.round.endsAt - Date.now()) / 1000)
+    : formatTime(multiplayerState.settings.roundTime);
+  const playerCount = multiplayerState.clients.length;
+  const carCount = Math.max(multiplayerState.settings.carCount, playerCount);
+
+  appendRoomSummaryItem("Room", multiplayerState.roomCode || "------");
+  appendRoomSummaryItem("Host", controller?.name ?? "Host");
+  appendRoomSummaryItem("Players", `${playerCount}/${carCount}`);
+  appendRoomSummaryItem("State", phaseLabel);
+  appendRoomSummaryItem("Round", secondsLeft);
+  appendRoomSummaryItem("Access", multiplayerState.roomVisibility === "private" ? "Private" : "Public");
+}
+
+function claimedColorNames() {
+  if (!multiplayerEnabled() || !multiplayerState.connected) return new Set();
+  return new Set(
+    multiplayerState.clients
+      .filter((client) => client.id !== multiplayerState.selfId)
+      .map((client) => client.color),
+  );
+}
+
+function multiplayerMinCarCount() {
+  if (!multiplayerEnabled() || !multiplayerState.connected) return 1;
+  return Math.max(1, Math.min(8, multiplayerState.clients.length));
+}
+
+function clampCarCountSelect({ notify = false } = {}) {
+  const minCars = multiplayerMinCarCount();
+  for (const option of playerCountSelect.options) {
+    option.disabled = multiplayerEnabled() && Number(option.value) < minCars;
+  }
+  if (Number(playerCountSelect.value) >= minCars) return;
+  playerCountSelect.value = String(minCars);
+  if (notify && isRoomController()) sendSettingsToServer();
+}
+
+function settingsFromControls() {
+  return {
+    roundTime: Number(roundTimeSelect.value),
+    carCount: Math.max(multiplayerMinCarCount(), Number(playerCountSelect.value)),
+    arena: arenaSelect.value,
+  };
+}
+
+function applySettingsToControls(nextSettings) {
+  if (!nextSettings) return;
+  if (roundTimeSelect.value !== String(nextSettings.roundTime)) {
+    roundTimeSelect.value = String(nextSettings.roundTime);
+  }
+  if (arenaSelect.value !== nextSettings.arena) arenaSelect.value = nextSettings.arena;
+  if (playerCountSelect.value !== String(nextSettings.carCount)) {
+    playerCountSelect.value = String(nextSettings.carCount);
+  }
+  clampCarCountSelect();
+  if (gameState.phase === "menu") gameState.timeRemaining = Number(roundTimeSelect.value);
+}
+
+function sendSettingsToServer() {
+  if (!isRoomController() || multiplayerState.phase !== "lobby") return;
+  const nextSettings = settingsFromControls();
+  multiplayerState.settings = nextSettings;
+  sendServerMessage({
+    type: "updateSettings",
+    settings: nextSettings,
+  });
+}
+
+function clearLocalInputState() {
+  playerCar.input.throttle = 0;
+  playerCar.input.steer = 0;
+  playerCar.input.boost = false;
+  playerCar.input.boostQueued = false;
+  playerCar.input.jumpQueued = false;
+  input.jumpQueued = false;
+  input.boostQueued = false;
+}
+
+function sendLocalInput(force = false) {
+  if (!isSharedCannonRoundActive() || gameState.phase !== "playing") return;
+  const now = performance.now();
+  const urgent = playerCar.input.jumpQueued || playerCar.input.boostQueued;
+  const sharedRound = activeSharedCannonRound();
+  const sessionId = multiplayerState.predictedRound ? multiplayerState.sessionId : gameState.sharedSessionId;
+  const inputSnapshot = {
+    throttle: playerCar.input.throttle,
+    steer: playerCar.input.steer,
+    boost: playerCar.input.boost,
+    boostQueued: playerCar.input.boostQueued,
+    jumpQueued: playerCar.input.jumpQueued,
+  };
+  if (sharedRound?.sim && sessionId) {
+    sharedRound.sim.inputs.set(sessionId, mergeSharedCannonInput(sharedRound.sim.inputs.get(sessionId), inputSnapshot));
+  }
+  playerCar.input.boostQueued = false;
+  playerCar.input.jumpQueued = false;
+  if (!isMultiplayerRoundActive()) return;
+  if (!force && !urgent && now - multiplayerState.lastInputSentAt < maxInputSendIntervalMs) return;
+  multiplayerState.lastInputSentAt = now;
+  multiplayerState.inputSequence += 1;
+  if (sharedRound?.sim && sessionId) {
+    sharedRound.sim.inputSequences.set(sessionId, multiplayerState.inputSequence);
+  }
+  sendServerMessage({
+    type: "input",
+    roundId: multiplayerState.activeRoundId,
+    sequence: multiplayerState.inputSequence,
+    input: inputSnapshot,
+  });
+}
+
+function makePredictedRound(round) {
+  const predictedRound = {
+    id: round.id,
+    startedAt: round.startedAt,
+    playStartsAt: round.playStartsAt,
+    endsAt: round.endsAt,
+    settings: round.settings,
+    slots: round.slots,
+  };
+  predictedRound.sim = createSharedCannonSimState(predictedRound, { now: Date.now() });
+  return predictedRound;
+}
+
+function makeLocalSharedRound({ roundTime, arena, slots }) {
+  const now = Date.now();
+  const playStartsAt = now + gameState.countdownDuration * 1000;
+  const sharedRound = {
+    id: `local-${now}`,
+    startedAt: now,
+    playStartsAt,
+    endsAt: playStartsAt + roundTime * 1000,
+    settings: {
+      roundTime,
+      carCount: slots.length,
+      arena,
+    },
+    slots,
+  };
+  sharedRound.sim = createSharedCannonSimState(sharedRound, { now });
+  return sharedRound;
+}
+
+function setPredictedCarFromSnapshot(carSnapshot, { soft = true } = {}) {
+  const predictedCar = multiplayerState.predictedRound?.sim?.cars?.get(carSnapshot.key);
+  if (!predictedCar) return;
+  const body = predictedCar.body;
+  const dx = carSnapshot.position[0] - body.position.x;
+  const dy = carSnapshot.position[1] - body.position.y;
+  const dz = carSnapshot.position[2] - body.position.z;
+  const distanceSq = dx * dx + dy * dy + dz * dz;
+  if (!soft || distanceSq > localPredictionSnapDistanceSq) {
+    body.position.set(carSnapshot.position[0], carSnapshot.position[1], carSnapshot.position[2]);
+    body.velocity.set(carSnapshot.velocity[0], carSnapshot.velocity[1], carSnapshot.velocity[2]);
+    body.quaternion.set(
+      carSnapshot.quaternion[0],
+      carSnapshot.quaternion[1],
+      carSnapshot.quaternion[2],
+      carSnapshot.quaternion[3],
+    );
+    body.angularVelocity.set(
+      carSnapshot.angularVelocity?.[0] ?? 0,
+      carSnapshot.angularVelocity?.[1] ?? 0,
+      carSnapshot.angularVelocity?.[2] ?? 0,
+    );
+  } else if (distanceSq > localPredictionDeadZoneSq) {
+    const correction = distanceSq > 9 ? localPredictionFastCorrection : localPredictionCorrection;
+    body.position.x += dx * correction;
+    body.position.y += dy * correction;
+    body.position.z += dz * correction;
+    body.velocity.x += (carSnapshot.velocity[0] - body.velocity.x) * 0.22;
+    body.velocity.y += (carSnapshot.velocity[1] - body.velocity.y) * 0.22;
+    body.velocity.z += (carSnapshot.velocity[2] - body.velocity.z) * 0.22;
+    predictionCurrentQuat
+      .set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w)
+      .normalize();
+    predictionTargetQuat
+      .set(carSnapshot.quaternion[0], carSnapshot.quaternion[1], carSnapshot.quaternion[2], carSnapshot.quaternion[3])
+      .normalize();
+    predictionSmoothedQuat.copy(predictionCurrentQuat).slerp(predictionTargetQuat, correction);
+    body.quaternion.set(
+      predictionSmoothedQuat.x,
+      predictionSmoothedQuat.y,
+      predictionSmoothedQuat.z,
+      predictionSmoothedQuat.w,
+    );
+    if (carSnapshot.angularVelocity) {
+      body.angularVelocity.x += (carSnapshot.angularVelocity[0] - body.angularVelocity.x) * 0.22;
+      body.angularVelocity.y += (carSnapshot.angularVelocity[1] - body.angularVelocity.y) * 0.22;
+      body.angularVelocity.z += (carSnapshot.angularVelocity[2] - body.angularVelocity.z) * 0.22;
+    }
+  }
+  predictedCar.body.force.set(0, 0, 0);
+  predictedCar.body.torque.set(0, 0, 0);
+  predictedCar.score = carSnapshot.score;
+  predictedCar.isIt = carSnapshot.isIt;
+  if (carSnapshot.input) predictedCar.input = cloneInputSnapshot(carSnapshot.input);
+  predictedCar.immunityRemaining = carSnapshot.immunityRemaining ?? predictedCar.immunityRemaining ?? 0;
+  predictedCar.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? predictedCar.boostTimeRemaining ?? 0;
+  predictedCar.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? predictedCar.boostCooldownRemaining ?? 0;
+}
+
+function rebuildPredictionFromServerSnapshot(snapshot) {
+  const predictedRound = multiplayerState.predictedRound;
+  const sessionId = multiplayerState.sessionId;
+  if (!snapshot || !predictedRound?.sim || !sessionId) return;
+
+  const localSnapshot = snapshot.cars.find((carSnapshot) => carSnapshot.sessionId === sessionId);
+  const predictedCar = localSnapshot ? predictedRound.sim.cars.get(localSnapshot.key) : null;
+  if (localSnapshot && predictedCar) {
+    const dx = localSnapshot.position[0] - predictedCar.body.position.x;
+    const dy = localSnapshot.position[1] - predictedCar.body.position.y;
+    const dz = localSnapshot.position[2] - predictedCar.body.position.z;
+    const correction = Math.hypot(dx, dy, dz);
+    multiplayerState.predictionStats.rebuilds += 1;
+    multiplayerState.predictionStats.lastCorrection = correction;
+    multiplayerState.predictionStats.maxCorrection = Math.max(multiplayerState.predictionStats.maxCorrection, correction);
+    if (correction > 0.4) multiplayerState.predictionStats.largeCorrections += 1;
+  }
+
+  const baseTickNow = Math.max(
+    predictedRound.playStartsAt,
+    snapshot.simLastTick ?? snapshot.serverTime ?? Date.now(),
+  );
+  for (const carSnapshot of snapshot.cars) {
+    setPredictedCarFromSnapshot(carSnapshot, { soft: false });
+  }
+  predictedRound.sim.lastTick = baseTickNow;
+  predictedRound.sim.accumulator = Math.max(0, Math.min(fixedStep, snapshot.simAccumulator ?? 0));
+  predictedRound.clientTickNow = baseTickNow;
+
+  const replaySamples = multiplayerState.predictionInputHistory
+    .filter((sample) => sample.tickNow > baseTickNow)
+    .sort((a, b) => a.tickNow - b.tickNow);
+
+  for (const sample of replaySamples) {
+    predictedRound.sim.inputs.set(sessionId, sample.input);
+    predictedRound.sim.inputSequences.set(sessionId, sample.sequence);
+    tickSharedCannonSim(predictedRound, sample.tickNow);
+    predictedRound.clientTickNow = sample.tickNow;
+  }
+
+  for (const carSnapshot of snapshot.cars) {
+    if (carSnapshot.sessionId === sessionId) continue;
+    setPredictedCarFromSnapshot(carSnapshot, { soft: false });
+  }
+}
+
+function applySharedCannonSnapshotToVisuals(snapshot, { localOnly = false, snap = false } = {}) {
+  if (!snapshot) return;
+  let itCar = null;
+  if (!localOnly) {
+    gameState.timeRemaining = snapshot.remainingMs / 1000;
+    for (const car of gameState.cars) car.isIt = false;
+  }
+  for (const carSnapshot of snapshot.cars) {
+    const car = gameState.networkCarByKey.get(carSnapshot.key);
+    if (!car) continue;
+    car.score = carSnapshot.score;
+    car.isIt = carSnapshot.isIt;
+    if (carSnapshot.input && car !== playerCar) car.input = cloneInputSnapshot(carSnapshot.input);
+    car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
+    car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
+    car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
+    if (car.isIt) itCar = car;
+    if (localOnly && car !== playerCar) continue;
+    writeCarBodyState(car, carSnapshot, { snap });
+  }
+  if (!localOnly && gameState.itCar !== itCar) {
+    if (gameState.itCar) gameState.itCar.isIt = false;
+    gameState.itCar = itCar;
+    if (gameState.itCar) gameState.itCar.isIt = true;
+  }
+  gameState.leaderboardDirty = true;
+}
+
+function updateSharedCannonPrediction() {
+  const sharedRound = activeSharedCannonRound();
+  if (!sharedRound?.sim) return;
+  const sessionId = multiplayerState.predictedRound ? multiplayerState.sessionId : gameState.sharedSessionId;
+  if (!sessionId) return;
+  const now = Date.now();
+  const tickNow = nextSharedCannonClientTickNow(sharedRound);
+  recordPredictionInputSample(sharedRound, sessionId, tickNow);
+  tickSharedCannonSim(sharedRound, tickNow);
+  const snapshot = makeSharedCannonSnapshot(multiplayerState.roomCode ?? "LOCAL", sharedRound, now);
+  if (!snapshot) return;
+  if (multiplayerState.predictedRound) {
+    const localSnapshot = snapshot.cars.find((car) => car.sessionId === sessionId);
+    if (!localSnapshot) return;
+    writeCarBodyState(playerCar, localSnapshot);
+    return;
+  }
+  applySharedCannonSnapshotToVisuals(snapshot);
+}
+
+function mirrorSharedCannonCountdownState() {
+  if (gameState.phase !== "countdown") return;
+  const sharedRound = activeSharedCannonRound();
+  if (!sharedRound?.sim) return;
+  const now = Date.now();
+  if (now < sharedRound.playStartsAt) sharedRound.sim.lastTick = now;
+  const snapshot = makeSharedCannonSnapshot(multiplayerState.roomCode ?? "LOCAL", sharedRound, now);
+  if (!snapshot) return;
+  if (multiplayerState.predictedRound) {
+    const sessionId = multiplayerState.sessionId;
+    const localSnapshot = snapshot.cars.find((car) => car.sessionId === sessionId);
+    if (localSnapshot) writeCarBodyState(playerCar, localSnapshot, { snap: true });
+    return;
+  }
+  applySharedCannonSnapshotToVisuals(snapshot, { snap: true });
+}
+
+function resetNetworkCars() {
+  for (const car of gameState.networkCars) {
+    car.isNetworkControlled = false;
+    car.networkKey = null;
+    car.networkTarget = null;
+  }
+  playerCar.networkKey = null;
+  playerCar.networkTarget = null;
+  gameState.networkCars = [];
+  gameState.networkCarByKey.clear();
+  multiplayerState.localServerSnapshot = null;
+  multiplayerState.acknowledgedInputSequence = 0;
+  multiplayerState.inputSequence = 0;
+  multiplayerState.lastInputSentAt = 0;
+  multiplayerState.predictedRound = null;
+  multiplayerState.predictionInputHistory = [];
+  multiplayerState.predictionStats.rebuilds = 0;
+  multiplayerState.predictionStats.maxCorrection = 0;
+  multiplayerState.predictionStats.lastCorrection = 0;
+  multiplayerState.predictionStats.largeCorrections = 0;
+  gameState.sharedRound = null;
+  gameState.sharedSessionId = "solo";
+}
+
+function writeCarBodyState(car, snapshot, { snap = false } = {}) {
+  car.body.previousPosition.copy(car.body.position);
+  car.body.previousQuaternion.copy(car.body.quaternion);
+  car.body.wakeUp();
+  car.body.position.set(snapshot.position[0], snapshot.position[1], snapshot.position[2]);
+  car.body.velocity.set(snapshot.velocity[0], snapshot.velocity[1], snapshot.velocity[2]);
+  car.body.angularVelocity.set(
+    snapshot.angularVelocity?.[0] ?? 0,
+    snapshot.angularVelocity?.[1] ?? 0,
+    snapshot.angularVelocity?.[2] ?? 0,
+  );
+  car.body.force.set(0, 0, 0);
+  car.body.torque.set(0, 0, 0);
+  car.body.quaternion.set(snapshot.quaternion[0], snapshot.quaternion[1], snapshot.quaternion[2], snapshot.quaternion[3]);
+  car.manualRightingActive = false;
+  car.manualRightingElapsed = 0;
+  clearVehicleInputs(car);
+  if (snap) {
+    car.body.previousPosition.copy(car.body.position);
+    car.body.previousQuaternion.copy(car.body.quaternion);
+  }
+  car.body.interpolatedPosition.copy(car.body.position);
+  car.body.interpolatedQuaternion.copy(car.body.quaternion);
+}
+
+function setNetworkCarTarget(car, snapshot) {
+  const firstTarget = !car.networkTarget;
+  car.networkTarget = {
+    position: snapshot.position,
+    velocity: snapshot.velocity,
+    angularVelocity: snapshot.angularVelocity,
+    quaternion: snapshot.quaternion,
+    receivedAt: performance.now(),
+  };
+  const dx = snapshot.position[0] - car.body.position.x;
+  const dy = snapshot.position[1] - car.body.position.y;
+  const dz = snapshot.position[2] - car.body.position.z;
+  if (firstTarget || dx * dx + dy * dy + dz * dz > 225) writeCarBodyState(car, snapshot);
+}
+
+function updateNetworkControlledCars(dt) {
+  const alpha = 1 - Math.exp(-dt * 16);
+  for (const car of gameState.networkCars) {
+    const target = car.networkTarget;
+    if (!target) continue;
+    car.body.previousPosition.copy(car.body.position);
+    car.body.previousQuaternion.copy(car.body.quaternion);
+    car.body.position.x += (target.position[0] - car.body.position.x) * alpha;
+    car.body.position.y += (target.position[1] - car.body.position.y) * alpha;
+    car.body.position.z += (target.position[2] - car.body.position.z) * alpha;
+    car.body.velocity.set(target.velocity[0], target.velocity[1], target.velocity[2]);
+    if (target.angularVelocity) {
+      car.body.angularVelocity.set(target.angularVelocity[0], target.angularVelocity[1], target.angularVelocity[2]);
+    }
+    networkCurrentQuat
+      .set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w)
+      .normalize();
+    networkTargetQuat
+      .set(target.quaternion[0], target.quaternion[1], target.quaternion[2], target.quaternion[3])
+      .normalize();
+    networkSmoothedQuat.copy(networkCurrentQuat).slerp(networkTargetQuat, alpha);
+    car.body.quaternion.set(
+      networkSmoothedQuat.x,
+      networkSmoothedQuat.y,
+      networkSmoothedQuat.z,
+      networkSmoothedQuat.w,
+    );
+    if (!target.angularVelocity) car.body.angularVelocity.set(0, 0, 0);
+    car.body.force.set(0, 0, 0);
+    car.body.torque.set(0, 0, 0);
+    car.body.interpolatedPosition.copy(car.body.position);
+    car.body.interpolatedQuaternion.copy(car.body.quaternion);
+    clearVehicleInputs(car);
+  }
+}
+
+function reconcileLocalPlayer(dt) {
+  const snapshot = multiplayerState.localServerSnapshot;
+  if (!snapshot || !isMultiplayerRoundActive() || gameState.phase !== "playing") return;
+  const dx = snapshot.position[0] - playerCar.body.position.x;
+  const dy = snapshot.position[1] - playerCar.body.position.y;
+  const dz = snapshot.position[2] - playerCar.body.position.z;
+  const distanceSq = dx * dx + dy * dy + dz * dz;
+  if (distanceSq > 625) {
+    writeCarBodyState(playerCar, snapshot);
+    return;
+  }
+  if (distanceSq < 49) return;
+  const alpha = 1 - Math.exp(-dt * 1.35);
+  playerCar.body.position.x += dx * alpha;
+  playerCar.body.position.y += dy * alpha;
+  playerCar.body.position.z += dz * alpha;
+  playerCar.body.velocity.x += (snapshot.velocity[0] - playerCar.body.velocity.x) * alpha * 0.25;
+  playerCar.body.velocity.y += (snapshot.velocity[1] - playerCar.body.velocity.y) * alpha * 0.25;
+  playerCar.body.velocity.z += (snapshot.velocity[2] - playerCar.body.velocity.z) * alpha * 0.25;
+}
+
+function applyServerSnapshot(snapshot) {
+  if (!snapshot || snapshot.roundId !== multiplayerState.activeRoundId) return;
+  gameState.timeRemaining = snapshot.remainingMs / 1000;
+  let itCar = null;
+  let sawLocalSnapshot = false;
+  for (const car of gameState.cars) car.isIt = false;
+  for (const carSnapshot of snapshot.cars) {
+    const car = gameState.networkCarByKey.get(carSnapshot.key);
+    if (!car) continue;
+    car.score = carSnapshot.score;
+    car.isIt = carSnapshot.isIt;
+    if (carSnapshot.input && car !== playerCar) car.input = cloneInputSnapshot(carSnapshot.input);
+    car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
+    car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
+    car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
+    if (car.isIt) itCar = car;
+    if (car === playerCar) {
+      multiplayerState.localServerSnapshot = carSnapshot;
+      multiplayerState.acknowledgedInputSequence = Math.max(
+        multiplayerState.acknowledgedInputSequence,
+        carSnapshot.inputSequence ?? 0,
+      );
+      sawLocalSnapshot = true;
+    } else {
+      setNetworkCarTarget(car, carSnapshot);
+    }
+  }
+  if (sawLocalSnapshot) {
+    rebuildPredictionFromServerSnapshot(snapshot);
+    multiplayerState.predictionInputHistory = multiplayerState.predictionInputHistory.filter(
+      (sample) => sample.tickNow > (snapshot.serverTime ?? 0),
+    );
+  }
+  if (gameState.itCar !== itCar) {
+    if (gameState.itCar) gameState.itCar.isIt = false;
+    gameState.itCar = itCar;
+    if (gameState.itCar) gameState.itCar.isIt = true;
+  }
+  gameState.leaderboardDirty = true;
+}
+
+function showMultiplayerScoreboardThenLobby() {
+  clearTimeout(multiplayerReturnTimer);
+  multiplayerReturnTimer = setTimeout(() => {
+    multiplayerReturnTimer = null;
+    if (multiplayerEnabled()) returnToMenu({ notifyServer: false });
+  }, 4200);
+}
+
+function updateMultiplayerControls() {
+  modeSoloButton.classList.toggle("active", multiplayerState.mode === "solo");
+  modeMultiplayerButton.classList.toggle("active", multiplayerEnabled());
+  multiplayerPanelEl.classList.toggle("hidden", !multiplayerEnabled());
+  const inRoom = isInMultiplayerRoom();
+  const inRound = inRoom && multiplayerState.phase === "round";
+  const selfInRound = inRound && multiplayerState.round?.slots?.some(
+    (slot) => slot.clientId === multiplayerState.selfId || slot.sessionId === multiplayerState.sessionId,
+  );
+  const browsingRooms = multiplayerEnabled() && !inRoom;
+  const canEditSettings = !multiplayerEnabled() || (inRoom && isRoomController() && multiplayerState.phase === "lobby");
+  const showSetup = !multiplayerEnabled() || canEditSettings;
+  const showColor = !multiplayerEnabled() || (inRoom && multiplayerState.phase === "lobby");
+
+  if (multiplayerEnabled()) {
+    const stateLabel = !multiplayerState.connected
+      ? "Connecting"
+      : browsingRooms
+        ? "Browse Rooms"
+        : inRound
+          ? selfInRound ? "Round Live" : "Waiting"
+          : isRoomController() ? "Room Host" : "Room Lobby";
+    connectionPillEl.textContent = stateLabel;
+    multiplayerTitleEl.textContent = browsingRooms ? "Online Rooms" : `Room ${multiplayerState.roomCode}`;
+    multiplayerSubtitleEl.textContent = browsingRooms
+      ? "Join a public room, enter a private code, or create a new room."
+      : inRound
+        ? selfInRound ? "You are in the current round." : "A round is already running. You will join the next one."
+        : isRoomController() ? "Set up the next round and start when everyone is ready." : "Choose your car color and wait for the host.";
+  }
+
+  nameFieldEl.classList.toggle("hidden", inRoom);
+  serverFieldEl.classList.toggle("hidden", multiplayerState.connected || inRoom);
+  roomCodeFieldEl.classList.toggle("hidden", inRoom);
+  connectServerButton.classList.toggle("hidden", !inRoom);
+  connectServerButton.classList.toggle("connected", inRoom);
+  connectServerButton.textContent = "Leave Room";
+  roomCodeInput.disabled = inRoom;
+  roomVisibilitySelect.disabled = !multiplayerState.connected || inRoom;
+  createRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom;
+  joinRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom || !roomCodeInput.value.trim();
+  refreshRoomsButton.disabled = !multiplayerEnabled() || !multiplayerState.connected;
+  roomActionsEl.classList.toggle("hidden", inRoom);
+  roomBrowserEl.classList.toggle("hidden", inRoom);
+  roomSummaryEl.classList.toggle("hidden", !inRoom);
+  lobbyListEl.classList.toggle("hidden", !inRoom);
+  setupGridEl.classList.toggle("hidden", !showSetup);
+  colorSectionEl.classList.toggle("hidden", !showColor);
+  startRoundButton.classList.toggle("hidden", multiplayerEnabled() && (!inRoom || !isRoomController() || multiplayerState.phase !== "lobby"));
+  roundTimeSelect.disabled = !canEditSettings;
+  playerCountSelect.disabled = !canEditSettings;
+  arenaSelect.disabled = !canEditSettings;
+
+  if (!multiplayerEnabled()) {
+    startRoundButton.disabled = false;
+    startRoundButton.textContent = "Start Round";
+  } else if (!multiplayerState.connected) {
+    startRoundButton.disabled = true;
+    startRoundButton.textContent = "Connecting...";
+  } else if (!inRoom) {
+    startRoundButton.disabled = true;
+    startRoundButton.textContent = "Join Or Create Room";
+  } else if (multiplayerState.phase !== "lobby") {
+    startRoundButton.disabled = true;
+    startRoundButton.textContent = "Round In Progress";
+  } else if (!isRoomController()) {
+    startRoundButton.disabled = true;
+    startRoundButton.textContent = "Waiting For Host";
+  } else {
+    startRoundButton.disabled = false;
+    startRoundButton.textContent = "Start Multiplayer Round";
+  }
+  clampCarCountSelect();
+}
+
+function renderMultiplayerLobby() {
+  if (!multiplayerEnabled()) return;
+  const controller = getControllerClient();
+  requestRoomList();
+  if (!multiplayerState.connected) {
+    lobbyStatusEl.textContent = "Connecting to multiplayer...";
+    lobbyListEl.innerHTML = "";
+    roomSummaryEl.innerHTML = "";
+    renderRoomBrowser();
+    updateMultiplayerControls();
+    return;
+  }
+  if (!isInMultiplayerRoom()) {
+    lobbyStatusEl.textContent = "Public rooms appear automatically. Use a room code for private rooms.";
+    lobbyListEl.innerHTML = "";
+    roomSummaryEl.innerHTML = "";
+    renderRoomBrowser();
+    updateMultiplayerControls();
+    return;
+  }
+
+  if (multiplayerState.phase === "round" && multiplayerState.round) {
+    const secondsLeft = Math.max(0, (multiplayerState.round.endsAt - Date.now()) / 1000);
+    const selfInRound = multiplayerState.round.slots.some(
+      (slot) => slot.clientId === multiplayerState.selfId || slot.sessionId === multiplayerState.sessionId,
+    );
+    lobbyStatusEl.textContent = selfInRound
+      ? `Round live - ${formatTime(secondsLeft)} left.`
+      : `Round in progress - you will join the next round in ${formatTime(secondsLeft)}.`;
+  } else if (isRoomController()) {
+    lobbyStatusEl.textContent = "You are the host. Set round options and start when everyone is ready.";
+  } else {
+    lobbyStatusEl.textContent = `Waiting for ${controller?.name ?? "the host"} to start the round.`;
+  }
+
+  renderRoomSummary();
+  lobbyListEl.innerHTML = "";
+  for (const client of multiplayerState.clients) {
+    const row = document.createElement("div");
+    row.className = "lobby-player";
+    row.style.setProperty("--player-color", getColorByName(client.color).css);
+    const labels = [];
+    if (client.id === multiplayerState.selfId) labels.push("You");
+    if (client.id === multiplayerState.controllerId) labels.push("Host");
+    if (client.inRound) labels.push("In Round");
+    const chip = document.createElement("span");
+    chip.className = "lobby-color";
+    const name = document.createElement("span");
+    name.textContent = client.name;
+    const role = document.createElement("span");
+    role.className = "lobby-role";
+    role.textContent = labels.join(" / ") || "Lobby";
+    row.append(chip, name, role);
+    lobbyListEl.append(row);
+  }
+  renderRoomBrowser();
+  updateMultiplayerControls();
+}
+
+function startServerRound(round) {
+  if (!round || multiplayerState.activeRoundId === round.id) return;
+  const localSlot = round.slots.find(
+    (slot) => slot.clientId === multiplayerState.selfId || slot.sessionId === multiplayerState.sessionId,
+  );
+  multiplayerState.round = round;
+  multiplayerState.phase = "round";
+  if (!localSlot) {
+    renderMultiplayerLobby();
+    return;
+  }
+
+  multiplayerState.activeRoundId = round.id;
+  startRound({
+    roundTime: round.settings.roundTime,
+    playerCount: round.settings.carCount,
+    arena: round.settings.arena,
+    playerColor: getColorByName(localSlot.color),
+    slots: round.slots,
+    localClientId: multiplayerState.selfId,
+    localSessionId: multiplayerState.sessionId,
+  });
+  multiplayerState.predictedRound = makePredictedRound(round);
+}
+
+function applyServerState(state) {
+  multiplayerState.connected = true;
+  multiplayerState.selfId = state.selfId ?? multiplayerState.selfId;
+  multiplayerState.roomCode = state.roomCode ?? multiplayerState.roomCode;
+  multiplayerState.roomVisibility = state.roomVisibility ?? multiplayerState.roomVisibility;
+  multiplayerState.controllerId = state.controllerId;
+  multiplayerState.phase = state.phase;
+  multiplayerState.clients = state.clients ?? [];
+  multiplayerState.settings = state.settings ?? multiplayerState.settings;
+  multiplayerState.round = state.round;
+  if (multiplayerState.roomCode) {
+    roomCodeInput.value = multiplayerState.roomCode;
+    localStorage.setItem("carTagRoomCode", multiplayerState.roomCode);
+    multiplayerState.lastConnectionOptions = {
+      lobbyOnly: false,
+      roomCode: multiplayerState.roomCode,
+      visibility: multiplayerState.roomVisibility,
+    };
+  }
+  roomVisibilitySelect.value = multiplayerState.roomVisibility;
+  localStorage.setItem("carTagRoomVisibility", multiplayerState.roomVisibility);
+  applySettingsToControls(multiplayerState.settings);
+
+  const selfClient = getSelfClient();
+  if (selfClient) {
+    const color = getColorByName(selfClient.color);
+    gameState.selectedColor = color;
+    if (gameState.phase === "menu") setCarColor(playerCar, color);
+  }
+
+  renderColorPicker();
+  renderMultiplayerLobby();
+  if (state.phase === "round" && state.round) startServerRound(state.round);
+}
+
+function connectMultiplayer(options = {}) {
+  if (options instanceof Event) options = {};
+  if (multiplayerState.connected) {
+    leaveCurrentRoom();
+    return;
+  }
+
+  clearMultiplayerReconnectTimer();
+  multiplayerState.manualDisconnect = false;
+  const url = currentServerUrl();
+  const name = currentPlayerName();
+  const lobbyOnly = Boolean(options.lobbyOnly);
+  const roomCode = lobbyOnly ? "" : (options.roomCode ?? roomCodeInput.value.trim().toUpperCase());
+  const visibility = options.visibility ?? selectedRoomVisibility();
+  multiplayerState.lastConnectionOptions = { lobbyOnly, roomCode, visibility };
+  localStorage.setItem("carTagServerUrl", url);
+  localStorage.setItem("carTagPlayerName", name);
+  localStorage.setItem("carTagRoomVisibility", visibility);
+  if (roomCode) localStorage.setItem("carTagRoomCode", roomCode);
+  if (lobbyOnly) {
+    multiplayerState.roomCode = "";
+    multiplayerState.controllerId = null;
+    multiplayerState.clients = [];
+    multiplayerState.round = null;
+    multiplayerState.activeRoundId = null;
+  }
+  lobbyStatusEl.textContent = "Connecting...";
+  updateMultiplayerControls();
+
+  const socket = new WebSocket(url);
+  multiplayerState.socket = socket;
+
+  socket.addEventListener("open", () => {
+    multiplayerState.connected = true;
+    multiplayerState.reconnectAttempts = 0;
+    sendServerMessage({
+      type: "hello",
+      protocolVersion,
+      name,
+      roomCode,
+      visibility,
+      lobbyOnly,
+      sessionId: multiplayerState.sessionId,
+    });
+    renderMultiplayerLobby();
+  });
+
+  socket.addEventListener("message", (event) => {
+    let message;
+    try {
+      message = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (message.type === "welcome") {
+      multiplayerState.selfId = message.id;
+      if (message.sessionId) {
+        multiplayerState.sessionId = message.sessionId;
+        localStorage.setItem("carTagSessionId", message.sessionId);
+      }
+      return;
+    }
+    if (message.type === "joined") {
+      if (message.sessionId) {
+        multiplayerState.sessionId = message.sessionId;
+        localStorage.setItem("carTagSessionId", message.sessionId);
+      }
+      if (message.roomCode) {
+        multiplayerState.roomCode = message.roomCode;
+        roomCodeInput.value = message.roomCode;
+        localStorage.setItem("carTagRoomCode", message.roomCode);
+        multiplayerState.lastConnectionOptions = {
+          lobbyOnly: false,
+          roomCode: message.roomCode,
+          visibility: multiplayerState.roomVisibility,
+        };
+      }
+      return;
+    }
+    if (message.type === "error") {
+      lobbyStatusEl.textContent = message.message ?? "Server error";
+      if (message.code === "protocol_mismatch") {
+        multiplayerState.manualDisconnect = true;
+        socket.close();
+      }
+      return;
+    }
+    if (message.type === "roomList") {
+      multiplayerState.publicRooms = message.rooms ?? [];
+      renderRoomBrowser();
+      return;
+    }
+    if (message.type === "state") {
+      applyServerState(message);
+      return;
+    }
+    if (message.type === "roundStarted") {
+      startServerRound(message.round);
+      return;
+    }
+    if (message.type === "snapshot") {
+      applyServerSnapshot(message);
+      return;
+    }
+    if (message.type === "roundEnded") {
+      if (message.snapshot) applyServerSnapshot(message.snapshot);
+      multiplayerState.activeRoundId = null;
+      multiplayerState.round = null;
+      multiplayerState.phase = "lobby";
+      if (gameState.phase !== "menu") {
+        endRound({ autoReturnToLobby: true });
+      }
+      renderMultiplayerLobby();
+    }
+  });
+
+  socket.addEventListener("close", () => {
+    const reconnectOptions = multiplayerState.lastConnectionOptions;
+    const shouldReconnect = multiplayerEnabled() && !multiplayerState.manualDisconnect && Boolean(reconnectOptions);
+    multiplayerState.connected = false;
+    multiplayerState.selfId = null;
+    multiplayerState.controllerId = null;
+    multiplayerState.phase = "lobby";
+    multiplayerState.clients = [];
+    multiplayerState.publicRooms = [];
+    multiplayerState.round = null;
+    multiplayerState.activeRoundId = null;
+    multiplayerState.roomCode = "";
+    if (multiplayerState.socket === socket) multiplayerState.socket = null;
+    lobbyStatusEl.textContent = "Disconnected";
+    renderColorPicker();
+    renderMultiplayerLobby();
+    if (shouldReconnect) scheduleMultiplayerReconnect(reconnectOptions);
+  });
+
+  socket.addEventListener("error", () => {
+    lobbyStatusEl.textContent = "Server unavailable";
+  });
+}
+
+function disconnectMultiplayer() {
+  clearTimeout(multiplayerReturnTimer);
+  multiplayerReturnTimer = null;
+  clearMultiplayerReconnectTimer();
+  multiplayerState.manualDisconnect = true;
+  if (multiplayerState.socket) multiplayerState.socket.close();
+  multiplayerState.socket = null;
+  multiplayerState.connected = false;
+  multiplayerState.roomCode = "";
+  multiplayerState.controllerId = null;
+  multiplayerState.clients = [];
+  multiplayerState.publicRooms = [];
+  multiplayerState.lastConnectionOptions = null;
+  multiplayerState.round = null;
+  multiplayerState.activeRoundId = null;
+  renderColorPicker();
+  renderMultiplayerLobby();
+}
+
+function setGameMode(mode) {
+  closePauseMenu({ restoreSolo: false });
+  multiplayerState.mode = mode;
+  if (mode === "solo" && multiplayerState.connected) disconnectMultiplayer();
+  if (mode === "multiplayer" && !multiplayerState.connected) connectMultiplayer({ lobbyOnly: true });
+  renderColorPicker();
+  renderMultiplayerLobby();
+  updateMultiplayerControls();
+}
+
 function renderColorPicker() {
   colorPickerEl.innerHTML = "";
+  const takenColors = claimedColorNames();
   for (const color of carPalette) {
+    const taken = takenColors.has(color.name);
     const button = document.createElement("button");
-    button.className = `color-swatch${color === gameState.selectedColor ? " selected" : ""}`;
+    button.className = `color-swatch${color === gameState.selectedColor ? " selected" : ""}${taken ? " taken" : ""}`;
     button.type = "button";
+    button.disabled = taken;
     button.style.setProperty("--swatch", color.css);
-    button.title = color.name;
+    button.title = taken ? `${color.name} is taken` : color.name;
     button.addEventListener("click", () => {
+      if (taken) return;
+      if (multiplayerEnabled() && multiplayerState.connected) {
+        sendServerMessage({ type: "setColor", color: color.name });
+        return;
+      }
       gameState.selectedColor = color;
       setCarColor(playerCar, color);
       renderColorPicker();
@@ -3016,6 +4220,11 @@ function updatePlayerInput() {
     input.boostQueued = false;
     return;
   }
+  if (multiplayerEnabled() && gameState.pauseMenuOpen) {
+    clearLocalInputState();
+    sendLocalInput(true);
+    return;
+  }
 
   const playerInput = clampPlayerInput(keyboardAxes());
   playerCar.input.throttle = playerInput.throttle;
@@ -3023,6 +4232,7 @@ function updatePlayerInput() {
   playerCar.input.boost = playerInput.boost;
   playerCar.input.jumpQueued = playerCar.input.jumpQueued || input.jumpQueued;
   playerCar.input.boostQueued = playerCar.input.boostQueued || input.boostQueued;
+  sendLocalInput();
   input.jumpQueued = false;
   input.boostQueued = false;
 }
@@ -3398,14 +4608,17 @@ function arenaContactForPoint(pos) {
 function updateRound(dt) {
   if (gameState.phase !== "playing") return;
 
-  gameState.timeRemaining = Math.max(0, gameState.timeRemaining - dt);
+  const sharedTimedRound = isSharedCannonRoundActive();
+  if (!sharedTimedRound) gameState.timeRemaining = Math.max(0, gameState.timeRemaining - dt);
   for (const car of gameState.cars) {
-    car.immunityRemaining = Math.max(0, car.immunityRemaining - dt);
-    if (!car.isIt) car.score += dt;
+    if (!sharedTimedRound) {
+      car.immunityRemaining = Math.max(0, car.immunityRemaining - dt);
+      if (!car.isIt) car.score += dt;
+    }
   }
   gameState.tagCooldown = Math.max(0, gameState.tagCooldown - dt);
 
-  if (gameState.timeRemaining <= 0) endRound();
+  if (gameState.timeRemaining <= 0 && !isMultiplayerRoundActive()) endRound();
 }
 
 function setCountdownText(text) {
@@ -3462,34 +4675,86 @@ function updateLeaderboard() {
   }
 }
 
-function startRound() {
+function startRound(options = {}) {
+  if (options instanceof Event) options = {};
+  closePauseMenu({ restoreSolo: false });
   clearTagBursts();
-  gameState.roundLength = Number(roundTimeSelect.value);
-  gameState.timeRemaining = gameState.roundLength;
-  gameState.playerCount = Number(playerCountSelect.value);
-  loadArena(arenaSelect.value);
-  activateCar(playerCar);
-  setCarColor(playerCar, gameState.selectedColor);
+  const roundLength = Number(options.roundTime ?? roundTimeSelect.value);
+  const serverSlots = Array.isArray(options.slots) ? options.slots : null;
+  const playerColor = options.playerColor ?? gameState.selectedColor;
+  const playerCount = Number(options.playerCount ?? serverSlots?.length ?? playerCountSelect.value);
+  const arenaId = options.arena ?? arenaSelect.value;
+  const localSessionId = options.localSessionId ?? "solo";
+  const localClientId = options.localClientId ?? "solo";
+  const slots = serverSlots ?? (() => {
+    const availableColors = shuffle(carPalette.filter((color) => color !== playerColor));
+    return [
+      {
+        key: `player:${localSessionId}`,
+        type: "player",
+        clientId: localClientId,
+        sessionId: localSessionId,
+        name: "You",
+        color: playerColor.name,
+      },
+      ...Array.from({ length: Math.max(0, playerCount - 1) }, (_, index) => {
+        const color = availableColors[index % availableColors.length];
+        return {
+          key: `ai:${index + 1}`,
+          type: "ai",
+          id: `ai-${index + 1}`,
+          name: `AI ${index + 1}`,
+          color: color.name,
+        };
+      }),
+    ];
+  })();
 
-  const availableColors = shuffle(carPalette.filter((color) => color !== gameState.selectedColor));
+  gameState.roundLength = roundLength;
+  gameState.timeRemaining = gameState.roundLength;
+  gameState.playerCount = slots.length;
+  loadArena(arenaId);
+  activateCar(playerCar);
+  resetNetworkCars();
+  gameState.sharedSessionId = localSessionId;
+  gameState.selectedColor = playerColor;
+  setCarColor(playerCar, playerColor);
+
   gameState.cars = [playerCar];
   gameState.aiCars = [];
-  for (let i = 1; i < gameState.playerCount; i += 1) {
-    const color = availableColors[(i - 1) % availableColors.length];
-    const aiCar = getPooledAiCar(i - 1, color);
-    gameState.aiCars.push(aiCar);
-    gameState.cars.push(aiCar);
+
+  const localSlot = slots.find(
+    (slot) => slot.clientId === localClientId || slot.sessionId === localSessionId,
+  ) ?? slots[0];
+  const localSlotKey = getSlotKey(localSlot);
+  playerCar.networkKey = localSlotKey;
+  if (localSlotKey) gameState.networkCarByKey.set(localSlotKey, playerCar);
+  let poolIndex = 0;
+  for (const slot of slots) {
+    const slotKey = getSlotKey(slot);
+    if (!slotKey || slotKey === localSlotKey) continue;
+    const color = getColorByName(slot.color);
+    const networkCar = getPooledAiCar(poolIndex, color);
+    networkCar.name = slot.name ?? color.name;
+    networkCar.networkKey = slotKey;
+    networkCar.isNetworkControlled = true;
+    gameState.networkCars.push(networkCar);
+    gameState.aiCars.push(networkCar);
+    gameState.networkCarByKey.set(slotKey, networkCar);
+    gameState.cars.push(networkCar);
+    poolIndex += 1;
   }
-  deactivateUnusedAiCars(Math.max(0, gameState.playerCount - 1));
+  deactivateUnusedAiCars(poolIndex);
 
   const spawns = shuffle(getArenaSpawnPoints());
   gameState.cars.forEach((car, index) => spawnCarAt(car, spawns[index % spawns.length]));
-  settleSpawnedCars();
 
-  gameState.itCar = gameState.cars.length > 1
-    ? gameState.cars[Math.floor(Math.random() * gameState.cars.length)]
-    : null;
-  if (gameState.itCar) gameState.itCar.isIt = true;
+  gameState.itCar = null;
+  for (const car of gameState.cars) car.isIt = false;
+  if (!serverSlots) {
+    gameState.sharedRound = makeLocalSharedRound({ roundTime: roundLength, arena: arenaId, slots });
+    applySharedCannonSnapshotToVisuals(makeSharedCannonSnapshot("LOCAL", gameState.sharedRound, Date.now()), { snap: true });
+  }
   gameState.tagCooldown = 0;
   gameState.countdownRemaining = gameState.countdownDuration;
   gameState.countdownText = "";
@@ -3506,7 +4771,9 @@ function startRound() {
   endScreenEl.classList.add("hidden");
 }
 
-function endRound() {
+function endRound(options = {}) {
+  if (options instanceof Event) options = {};
+  closePauseMenu({ restoreSolo: false });
   gameState.phase = "ended";
   setUiPhase("ended");
   countdownEl.classList.add("hidden");
@@ -3533,14 +4800,26 @@ function endRound() {
     resultsListEl.append(item);
   });
   endScreenEl.classList.remove("hidden");
+  if (options.autoReturnToLobby) showMultiplayerScoreboardThenLobby();
 }
 
-function returnToMenu() {
+function returnToMenu(options = {}) {
+  if (options instanceof Event) options = {};
+  clearTimeout(multiplayerReturnTimer);
+  multiplayerReturnTimer = null;
+  closePauseMenu({ restoreSolo: false });
+  const notifyServer = options.notifyServer ?? true;
+  if (notifyServer && multiplayerEnabled() && multiplayerState.connected && multiplayerState.activeRoundId) {
+    sendServerMessage({ type: "leaveRound" });
+    multiplayerState.activeRoundId = null;
+  }
   gameState.phase = "menu";
   setUiPhase("menu");
   clearTagBursts();
   for (const car of gameState.aiCars) deactivateCar(car);
+  for (const car of gameState.networkCars) deactivateCar(car);
   gameState.aiCars = [];
+  resetNetworkCars();
   gameState.cars = [playerCar];
   gameState.itCar = null;
   gameState.countdownRemaining = 0;
@@ -3551,6 +4830,61 @@ function returnToMenu() {
   endScreenEl.classList.add("hidden");
   gameState.timeRemaining = Number(roundTimeSelect.value);
   gameState.leaderboardDirty = true;
+  renderMultiplayerLobby();
+}
+
+function renderPauseMenu() {
+  const multiplayer = multiplayerEnabled();
+  pauseEyebrowEl.textContent = multiplayer ? "Menu" : "Paused";
+  pauseTitleEl.textContent = multiplayer ? "Multiplayer Menu" : "Game Paused";
+  pauseCopyEl.textContent = multiplayer
+    ? "The online round keeps running while this menu is open."
+    : "Solo play is paused until you resume.";
+  pauseDisconnectButton.classList.toggle("hidden", !multiplayerState.connected);
+}
+
+function openPauseMenu() {
+  if (gameState.phase !== "playing" && gameState.phase !== "countdown") return;
+  if (!multiplayerEnabled()) {
+    gameState.pausedFromPhase = gameState.phase;
+    gameState.phase = "paused";
+    setUiPhase("paused");
+    clearLocalInputState();
+    clearVehicleInputs(playerCar);
+  } else {
+    clearLocalInputState();
+    sendLocalInput(true);
+  }
+  gameState.pauseMenuOpen = true;
+  renderPauseMenu();
+  pauseScreenEl.classList.remove("hidden");
+}
+
+function closePauseMenu({ restoreSolo = true } = {}) {
+  if (!gameState.pauseMenuOpen) return;
+  pauseScreenEl.classList.add("hidden");
+  gameState.pauseMenuOpen = false;
+  if (restoreSolo && !multiplayerEnabled() && gameState.phase === "paused") {
+    gameState.phase = gameState.pausedFromPhase ?? "playing";
+    setUiPhase(gameState.phase);
+    accumulator = 0;
+    lastTime = performance.now();
+  }
+  gameState.pausedFromPhase = null;
+}
+
+function togglePauseMenu() {
+  if (gameState.pauseMenuOpen) {
+    closePauseMenu();
+    return;
+  }
+  openPauseMenu();
+}
+
+function disconnectFromPauseMenu() {
+  closePauseMenu({ restoreSolo: false });
+  disconnectMultiplayer();
+  returnToMenu({ notifyServer: false });
 }
 
 const cameraState = {
@@ -3586,7 +4920,7 @@ function keepCameraInsideArena(point, clearance = 1.15) {
   return point;
 }
 
-function syncCarVisual(car, interpolationAlpha, visualTime) {
+function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
   car.visual.position.set(
     THREE.MathUtils.lerp(car.body.previousPosition.x, car.body.position.x, interpolationAlpha),
     THREE.MathUtils.lerp(car.body.previousPosition.y, car.body.position.y, interpolationAlpha),
@@ -3605,7 +4939,40 @@ function syncCarVisual(car, interpolationAlpha, visualTime) {
   car.body.quaternion.set(tmpQuat.x, tmpQuat.y, tmpQuat.z, tmpQuat.w);
 
   const wheelBaseIndex = car.wheelVisuals.slot * wheelsPerCar;
+  const useSharedWheelVisuals = isSharedCannonRoundActive();
   for (let i = 0; i < car.vehicle.wheelInfos.length; i += 1) {
+    if (useSharedWheelVisuals) {
+      const point = wheelPositions[i];
+      const forward = tmpVec3D.set(0, 0, 1).applyQuaternion(car.visual.quaternion).normalize();
+      const forwardSpeed =
+        car.body.velocity.x * forward.x +
+        car.body.velocity.y * forward.y +
+        car.body.velocity.z * forward.z;
+      car.visualWheelSpin[i] += (forwardSpeed * dt) / Math.max(0.001, wheelOptions.radius);
+      const steerInput = car === playerCar
+        ? playerCar.input.steer
+        : (car.input?.steer ?? 0);
+      const steerAngle = i < 2
+        ? THREE.MathUtils.clamp(steerInput * vehicleTuning.steerAngle, -vehicleTuning.steerAngle, vehicleTuning.steerAngle)
+        : 0;
+      car.visualWheelSteer[i] = steerAngle;
+      wheelVisualPosition
+        .set(point.x, point.y - 0.28, point.z)
+        .applyQuaternion(car.visual.quaternion)
+        .add(car.visual.position);
+      wheelSteerQuaternion.setFromAxisAngle(upAxis, steerAngle);
+      wheelSpinQuaternion.setFromAxisAngle(tmpVec3A.set(1, 0, 0), car.visualWheelSpin[i]);
+      wheelVisualQuaternion
+        .copy(car.visual.quaternion)
+        .multiply(wheelSteerQuaternion)
+        .multiply(wheelSpinQuaternion);
+      wheelMatrix.compose(wheelVisualPosition, wheelVisualQuaternion, wheelVisualScale);
+      car.wheelVisuals.tires.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
+      car.wheelVisuals.rims.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
+      car.wheelVisuals.hubs.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
+      continue;
+    }
+
     car.vehicle.updateWheelTransform(i);
     const wheel = car.vehicle.wheelInfos[i];
     const transform = wheel.worldTransform;
@@ -3625,6 +4992,7 @@ function syncCarVisual(car, interpolationAlpha, visualTime) {
     }
 
     wheelVisualQuaternion.set(transform.quaternion.x, transform.quaternion.y, transform.quaternion.z, transform.quaternion.w);
+    car.visualWheelSteer[i] = i < 2 ? car.currentSteering : 0;
     wheelMatrix.compose(wheelVisualPosition, wheelVisualQuaternion, wheelVisualScale);
     car.wheelVisuals.tires.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
     car.wheelVisuals.rims.setMatrixAt(wheelBaseIndex + i, wheelMatrix);
@@ -3731,7 +5099,7 @@ function updateHud() {
 function syncVisuals(dt, interpolationAlpha) {
   const visualTime = performance.now();
   updateTagBursts(dt);
-  for (const car of gameState.cars) syncCarVisual(car, interpolationAlpha, visualTime);
+  for (const car of gameState.cars) syncCarVisual(car, interpolationAlpha, visualTime, dt);
   if (globalWheelVisuals) {
     globalWheelVisuals.tires.instanceMatrix.needsUpdate = true;
     globalWheelVisuals.rims.instanceMatrix.needsUpdate = true;
@@ -3808,6 +5176,8 @@ function syncVisuals(dt, interpolationAlpha) {
 function runUnprofiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) {
   if (gameState.phase === "countdown") {
     for (const car of gameState.cars) clearVehicleInputs(car);
+    mirrorSharedCannonCountdownState();
+    updateNetworkControlledCars(fixedStep);
     updateCountdown(fixedStep);
   } else if (gameState.phase === "playing") {
     if (scriptedPlayer) {
@@ -3816,20 +5186,38 @@ function runUnprofiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}
       playerCar.input.boost = false;
       if (stepIndex % 180 === 20) playerCar.input.boostQueued = true;
       if (stepIndex % 300 === 80) playerCar.input.jumpQueued = true;
+      sendLocalInput(true);
     } else {
       updatePlayerInput();
     }
 
+    if (isSharedCannonRoundActive()) {
+      updateSharedCannonPrediction();
+      if (isMultiplayerRoundActive()) updateNetworkControlledCars(fixedStep);
+      updateRound(fixedStep);
+      return;
+    }
+
     for (const car of gameState.aiCars) updateAiCar(car, fixedStep, aiUpdateContext);
+    updateNetworkControlledCars(fixedStep);
     for (const car of gameState.cars) {
+      if (car.isNetworkControlled) {
+        clearVehicleInputs(car);
+        continue;
+      }
       driveCar(car);
       applyAirControls(car);
       applyBoost(car, fixedStep);
     }
     physics.step(fixedStep);
+    reconcileLocalPlayer(fixedStep);
     processPhysicsContacts();
-    for (const car of gameState.cars) applyQueuedJump(car);
-    for (const car of gameState.cars) updateManualRighting(car, fixedStep);
+    for (const car of gameState.cars) {
+      if (!car.isNetworkControlled) applyQueuedJump(car);
+    }
+    for (const car of gameState.cars) {
+      if (!car.isNetworkControlled) updateManualRighting(car, fixedStep);
+    }
     updateRound(fixedStep);
   } else {
     clearVehicleInputs(playerCar);
@@ -3860,6 +5248,8 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
     const previousPhase = setProfilePhase("countdown");
     const bucketStart = performance.now();
     for (const car of gameState.cars) clearVehicleInputs(car);
+    mirrorSharedCannonCountdownState();
+    updateNetworkControlledCars(fixedStep);
     updateCountdown(fixedStep);
     recordProfileBucket("countdown", performance.now() - bucketStart);
     profilePhase = previousPhase;
@@ -3872,11 +5262,25 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
       playerCar.input.boost = false;
       if (stepIndex % 180 === 20) playerCar.input.boostQueued = true;
       if (stepIndex % 300 === 80) playerCar.input.jumpQueued = true;
+      sendLocalInput(true);
     } else {
       updatePlayerInput();
     }
     recordProfileBucket("input", performance.now() - bucketStart);
     profilePhase = previousPhase;
+
+    if (isSharedCannonRoundActive()) {
+      previousPhase = setProfilePhase("sharedPrediction");
+      bucketStart = performance.now();
+      updateSharedCannonPrediction();
+      if (isMultiplayerRoundActive()) updateNetworkControlledCars(fixedStep);
+      updateRound(fixedStep);
+      recordProfileBucket("sharedPrediction", performance.now() - bucketStart);
+      profilePhase = previousPhase;
+      detailedProfile.steps += 1;
+      recordProfileSample("stepMs", performance.now() - stepStart);
+      return;
+    }
 
     for (const car of gameState.aiCars) {
       previousPhase = setProfilePhase("ai");
@@ -3885,7 +5289,12 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
       recordProfileBucket("ai", performance.now() - bucketStart);
       profilePhase = previousPhase;
     }
+    updateNetworkControlledCars(fixedStep);
     for (const car of gameState.cars) {
+      if (car.isNetworkControlled) {
+        clearVehicleInputs(car);
+        continue;
+      }
       previousPhase = setProfilePhase("drive");
       bucketStart = performance.now();
       driveCar(car);
@@ -3908,6 +5317,7 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
     previousPhase = setProfilePhase("physicsStep");
     bucketStart = performance.now();
     physics.step(fixedStep);
+    reconcileLocalPlayer(fixedStep);
     const physicsStepMs = performance.now() - bucketStart;
     recordProfileBucket("physicsStep", physicsStepMs);
     recordProfileSample("physicsStepMs", physicsStepMs);
@@ -3920,6 +5330,7 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
     profilePhase = previousPhase;
 
     for (const car of gameState.cars) {
+      if (car.isNetworkControlled) continue;
       previousPhase = setProfilePhase("jump");
       bucketStart = performance.now();
       applyQueuedJump(car);
@@ -3927,6 +5338,7 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
       profilePhase = previousPhase;
     }
     for (const car of gameState.cars) {
+      if (car.isNetworkControlled) continue;
       previousPhase = setProfilePhase("righting");
       bucketStart = performance.now();
       updateManualRighting(car, fixedStep);
@@ -4033,6 +5445,8 @@ window.__arenaCarDebug = {
         surfaceContactGrace: car.surfaceContactGrace,
         manualRighting: car.manualRightingActive,
         input: { throttle: car.input.throttle, steer: car.input.steer, boostQueued: car.input.boostQueued },
+        visualWheelSpin: car.visualWheelSpin?.map((value) => Number(value.toFixed(4))) ?? [],
+        visualWheelSteer: car.visualWheelSteer?.map((value) => Number(value.toFixed(4))) ?? [],
         ai: car.isPlayer ? null : {
           stuckTimer: car.ai.stuckTimer,
           unstickTimer: car.ai.unstickTimer,
@@ -4048,6 +5462,16 @@ window.__arenaCarDebug = {
       speed: Math.abs(playerCar.vehicle.currentVehicleSpeedKmHour) * 0.621371,
       boostCooldown: playerCar.boostCooldownRemaining,
       boostActive: playerCar.boostTimeRemaining,
+      multiplayer: {
+        mode: multiplayerState.mode,
+        connected: multiplayerState.connected,
+        roomCode: multiplayerState.roomCode,
+        phase: multiplayerState.phase,
+        activeRoundId: multiplayerState.activeRoundId,
+        acknowledgedInputSequence: multiplayerState.acknowledgedInputSequence,
+        sentInputSequence: multiplayerState.inputSequence,
+        predictionStats: { ...multiplayerState.predictionStats },
+      },
       touchInput: { throttle: touchInput.throttle, steer: touchInput.steer, jumpQueued: input.jumpQueued },
       wheelsOnGround: playerCar.vehicle.numWheelsOnGround,
       surface: playerCar.vehicle.numWheelsOnGround > 0 ? "GRIP" : "AIR",
@@ -4100,7 +5524,7 @@ window.__arenaCarDebug = {
   startRound(options = {}) {
     if (options.roundTime) roundTimeSelect.value = String(options.roundTime);
     if (options.playerCount) playerCountSelect.value = String(options.playerCount);
-    startRound();
+    startRound(options);
   },
   queueBoost() {
     playerCar.input.boostQueued = true;
@@ -4155,14 +5579,78 @@ window.addEventListener("resize", () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-roundTimeSelect.addEventListener("change", () => {
+function requestRoundStart() {
+  if (multiplayerEnabled()) {
+    if (!multiplayerState.connected || !isRoomController() || multiplayerState.phase !== "lobby") return;
+    sendSettingsToServer();
+    sendServerMessage({ type: "startRound" });
+    return;
+  }
+  startRound();
+}
+
+function handleSetupChanged() {
+  clampCarCountSelect({ notify: true });
   if (gameState.phase === "menu") gameState.timeRemaining = Number(roundTimeSelect.value);
+  sendSettingsToServer();
+  updateMultiplayerControls();
+}
+
+roundTimeSelect.addEventListener("change", handleSetupChanged);
+playerCountSelect.addEventListener("change", handleSetupChanged);
+arenaSelect.addEventListener("change", handleSetupChanged);
+modeSoloButton.addEventListener("click", () => setGameMode("solo"));
+modeMultiplayerButton.addEventListener("click", () => setGameMode("multiplayer"));
+connectServerButton.addEventListener("click", leaveCurrentRoom);
+createRoomButton.addEventListener("click", createRoomOnServer);
+joinRoomButton.addEventListener("click", joinCodeRoomOnServer);
+refreshRoomsButton.addEventListener("click", () => requestRoomList({ force: true }));
+multiplayerNameInput.addEventListener("change", () => {
+  const name = currentPlayerName();
+  multiplayerNameInput.value = name;
+  localStorage.setItem("carTagPlayerName", name);
+  if (isInMultiplayerRoom()) sendServerMessage({ type: "setName", name });
 });
-startRoundButton.addEventListener("click", startRound);
+serverUrlInput.addEventListener("change", () => {
+  localStorage.setItem("carTagServerUrl", serverUrlInput.value.trim() || defaultServerUrl);
+});
+roomCodeInput.addEventListener("input", () => {
+  roomCodeInput.value = roomCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+  updateMultiplayerControls();
+});
+roomCodeInput.addEventListener("change", () => {
+  const roomCode = roomCodeInput.value.trim().toUpperCase();
+  if (roomCode) {
+    localStorage.setItem("carTagRoomCode", roomCode);
+  } else {
+    localStorage.removeItem("carTagRoomCode");
+  }
+});
+roomVisibilitySelect.addEventListener("change", () => {
+  const visibility = selectedRoomVisibility();
+  multiplayerState.roomVisibility = visibility;
+  localStorage.setItem("carTagRoomVisibility", visibility);
+  if (isRoomController() && multiplayerState.phase === "lobby") {
+    sendServerMessage({ type: "setRoomVisibility", visibility });
+  }
+});
+startRoundButton.addEventListener("click", requestRoundStart);
 playAgainButton.addEventListener("click", returnToMenu);
-menuReturnButton.addEventListener("click", returnToMenu);
+menuReturnButton.addEventListener("click", openPauseMenu);
+resumeGameButton.addEventListener("click", () => closePauseMenu());
+pauseMenuButton.addEventListener("click", returnToMenu);
+pauseDisconnectButton.addEventListener("click", disconnectFromPauseMenu);
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (gameState.phase === "menu" || gameState.phase === "ended") return;
+  event.preventDefault();
+  togglePauseMenu();
+});
 
 renderColorPicker();
+renderMultiplayerLobby();
+updateMultiplayerControls();
+setInterval(renderMultiplayerLobby, 500);
 setUiPhase("menu");
 spawnCarAt(playerCar, getArenaSpawnPoints()[0]);
 gameState.timeRemaining = Number(roundTimeSelect.value);

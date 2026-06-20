@@ -8,11 +8,11 @@ const tmpVec3D = new THREE.Vector3();
 const tmpVec3E = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 
-export function pickWaypoint(car) {
-  const angle = Math.random() * Math.PI * 2;
-  const radius = 18 + Math.random() * 42;
+export function pickWaypoint(car, rng = Math.random) {
+  const angle = rng() * Math.PI * 2;
+  const radius = 18 + rng() * 42;
   car.ai.waypoint.set(Math.cos(angle) * radius, 0, Math.sin(angle) * radius);
-  car.ai.waypointTimer = 2.5 + Math.random() * 2.5;
+  car.ai.waypointTimer = 2.5 + rng() * 2.5;
 }
 
 function steerToward(car, desired, aggression = 1) {
@@ -89,7 +89,7 @@ function closestTagTargetFor(car, gameState) {
   return best;
 }
 
-function updateAiObjective(car, targetPoint, dt, refreshDistance = 10) {
+function updateAiObjective(car, targetPoint, dt, refreshDistance = 10, rng = Math.random) {
   car.ai.objectiveTimer -= dt;
   const current = flatCarPosition(car, tmpVec3A);
   if (
@@ -98,7 +98,7 @@ function updateAiObjective(car, targetPoint, dt, refreshDistance = 10) {
     car.ai.objective.distanceTo(targetPoint) > 18
   ) {
     car.ai.objective.copy(targetPoint);
-    car.ai.objectiveTimer = 0.75 + Math.random() * 0.45;
+    car.ai.objectiveTimer = 0.75 + rng() * 0.45;
   }
 }
 
@@ -121,7 +121,7 @@ function chooseAiChaseVector(car, target, desired, arenaContactForPoint) {
   }
 }
 
-function chooseAiEscapeVector(car, threat, desired, dt, gameState) {
+function chooseAiEscapeVector(car, threat, desired, dt, gameState, rng = Math.random) {
   const pos = flatCarPosition(car, tmpVec3A);
   const threatPos = flatCarPosition(threat, tmpVec3B);
   const threatVelocity = flatCarVelocity(threat, tmpVec3C);
@@ -175,11 +175,11 @@ function chooseAiEscapeVector(car, threat, desired, dt, gameState) {
   }
 
   clampArenaVector(safePoint, worldSpec.floorRadius - 7);
-  updateAiObjective(car, safePoint, dt, 9);
+  updateAiObjective(car, safePoint, dt, 9, rng);
   desired.copy(car.ai.objective).sub(pos);
 }
 
-export function updateAiCar(car, dt, { gameState, arenaContactForPoint, shouldRightWithJump }) {
+export function updateAiCar(car, dt, { gameState, arenaContactForPoint, shouldRightWithJump, rng = Math.random }) {
   car.ai.jumpCooldown = Math.max(0, car.ai.jumpCooldown - dt);
   car.ai.reverseTimer = Math.max(0, car.ai.reverseTimer - dt);
   car.ai.unstickTimer = Math.max(0, car.ai.unstickTimer - dt);
@@ -188,7 +188,7 @@ export function updateAiCar(car, dt, { gameState, arenaContactForPoint, shouldRi
   car.ai.lateralTimer -= dt;
   if (car.ai.lateralTimer <= 0) {
     car.ai.lateralSign *= -1;
-    car.ai.lateralTimer = 2.2 + Math.random() * 2.4;
+    car.ai.lateralTimer = 2.2 + rng() * 2.4;
   }
 
   if (gameState.phase !== "playing") return;
@@ -222,17 +222,17 @@ export function updateAiCar(car, dt, { gameState, arenaContactForPoint, shouldRi
     activeTarget = itCar;
     const threatDistance = flatDistanceBetween(car, itCar);
     if (threatDistance > 0.001) {
-      chooseAiEscapeVector(car, itCar, desired, dt, gameState);
+      chooseAiEscapeVector(car, itCar, desired, dt, gameState, rng);
     } else {
       car.ai.waypointTimer -= dt;
-      if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car);
+      if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car, rng);
       desired.copy(car.ai.waypoint).sub(pos);
     }
   }
 
   if (desired.lengthSq() < 0.001) {
     car.ai.waypointTimer -= dt;
-    if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car);
+    if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car, rng);
     desired.copy(car.ai.waypoint).sub(pos);
   }
 
@@ -282,7 +282,7 @@ export function updateAiCar(car, dt, { gameState, arenaContactForPoint, shouldRi
     car.ai.unstickTimer = car.isIt && activeTarget ? 0.42 : 0.82;
     car.ai.unstickSteer = car.isIt && activeTarget
       ? THREE.MathUtils.clamp(aimAngle / 0.72, -1, 1)
-      : Math.random() < 0.5 ? -1 : 1;
+      : rng() < 0.5 ? -1 : 1;
     if (Math.abs(car.ai.unstickSteer) > 0.2) car.ai.lateralSign = Math.sign(car.ai.unstickSteer);
     car.ai.stuckTimer = 0;
     if (car.vehicle.numWheelsOnGround >= 2 && car.ai.jumpCooldown <= 0) {
