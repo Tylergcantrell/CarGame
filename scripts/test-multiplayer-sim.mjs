@@ -84,4 +84,21 @@ for (let i = 1; i <= 8; i += 1) tickSim(tagRound, i * 1000 / 60);
 assert.equal(target.isIt, true, "Cannon contact should transfer tag");
 assert.equal(tagger.isIt, false, "tagger should stop being it");
 
+const disconnectedRound = makeRound();
+disconnectedRound.sim = createSimState(disconnectedRound, { now: 0, rng: () => 0 });
+const disconnectedSlot = disconnectedRound.slots.find((slot) => slot.sessionId === "a");
+disconnectedSlot.type = "ai";
+disconnectedSlot.clientId = null;
+disconnectedRound.sim.inputs.delete("a");
+const disconnectedCar = disconnectedRound.sim.cars.get("player:a");
+const activeCar = disconnectedRound.sim.cars.get("player:b");
+activeCar.isIt = true;
+disconnectedCar.isIt = false;
+disconnectedCar.body.position.copy(activeCar.body.position);
+disconnectedCar.body.position.x += 0.8;
+disconnectedCar.body.position.z += 0.8;
+for (let i = 1; i <= 8; i += 1) tickSim(disconnectedRound, i * 1000 / 60);
+assert.equal(disconnectedCar.isIt, true, "AI-controlled disconnected slot should remain collidable");
+assert.equal(activeCar.isIt, false, "tagger should transfer tag to disconnected slot car");
+
 console.log(JSON.stringify({ ok: true, distance: Number(distance.toFixed(3)) }, null, 2));

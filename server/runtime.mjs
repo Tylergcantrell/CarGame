@@ -376,6 +376,60 @@ function broadcastState(room) {
   broadcast(room, (selfId) => publicState(room, selfId));
 }
 
+function roundCarsForSlots(round) {
+  if (!round?.sim) return [];
+  return round.slots
+    .map((slot) => ({ slot, car: round.sim.cars.get(slot.key) }))
+    .filter((entry) => entry.car);
+}
+
+function reassignItFromSlot(room, departingSlot) {
+  const round = room.activeRound;
+  const departingCar = departingSlot ? round?.sim?.cars.get(departingSlot.key) : null;
+  if (!round?.sim || !departingCar?.isIt) return false;
+
+  const activeSessions = new Set([...room.clients.values()].map((client) => client.sessionId));
+  const entries = roundCarsForSlots(round).filter((entry) => entry.slot.key !== departingSlot.key);
+  const replacement =
+    entries.find((entry) => entry.slot.type === "player" && activeSessions.has(entry.slot.sessionId))?.car ??
+    entries[0]?.car ??
+    null;
+
+  departingCar.isIt = false;
+  departingCar.immunityRemaining = 0;
+  if (!replacement) return true;
+  replacement.isIt = true;
+  replacement.immunityRemaining = 0;
+  return true;
+}
+
+function ensureRoundHasIt(room) {
+  const entries = roundCarsForSlots(room.activeRound);
+  if (entries.length === 0 || entries.some((entry) => entry.car.isIt)) return false;
+
+  const activeSessions = new Set([...room.clients.values()].map((client) => client.sessionId));
+  const replacement =
+    entries.find((entry) => entry.slot.type === "player" && activeSessions.has(entry.slot.sessionId))?.car ??
+    entries[0].car;
+  replacement.isIt = true;
+  replacement.immunityRemaining = 0;
+  return true;
+}
+
+function convertRoundSlotToAi(room, slot, { keepSession = true } = {}) {
+  if (!room.activeRound || !slot) return false;
+  const changedIt = reassignItFromSlot(room, slot);
+  const previousSessionId = slot.sessionId;
+
+  slot.type = "ai";
+  slot.clientId = null;
+  slot.id ??= `ai:${slot.key}`;
+  if (!keepSession) slot.sessionId = null;
+  if (previousSessionId) room.activeRound.sim?.inputs.delete(previousSessionId);
+
+  return changedIt || ensureRoundHasIt(room);
+}
+
 function buildRoundSlots(room, roundSettings) {
   const players = [...room.clients.values()];
   const usedColors = new Set();
@@ -515,10 +569,7 @@ function leaveRoom(client, { removeRoundSlot = true } = {}) {
   room.settings = normalizeSettings(room, room.settings);
   if (room.activeRound) {
     const slot = room.activeRound.slots.find((entry) => entry.sessionId === client.sessionId);
-    if (slot) slot.clientId = null;
-    if (removeRoundSlot) {
-      room.activeRound.slots = room.activeRound.slots.filter((entry) => entry.sessionId !== client.sessionId);
-    }
+    if (slot) convertRoundSlotToAi(room, slot, { keepSession: !removeRoundSlot });
     if (!room.activeRound.slots.some((entry) => entry.type === "player" && entry.clientId)) {
       endRound(room, "empty");
     }
@@ -549,7 +600,12 @@ function joinRoom(client, room, requestedName) {
 
   if (room.activeRound) {
     const slot = room.activeRound.slots.find((entry) => entry.sessionId === client.sessionId);
-    if (slot) slot.clientId = client.id;
+    if (slot) {
+      slot.type = "player";
+      slot.clientId = client.id;
+      slot.name = client.name;
+      slot.color = client.color;
+    }
   }
 
   assignController(room);
@@ -703,7 +759,8 @@ function handleMessage(client, raw) {
 
   if (message.type === "leaveRound") {
     if (!room.activeRound) return;
-    room.activeRound.slots = room.activeRound.slots.filter((slot) => slot.sessionId !== client.sessionId);
+    const slot = room.activeRound.slots.find((entry) => entry.sessionId === client.sessionId);
+    if (slot) convertRoundSlotToAi(room, slot, { keepSession: false });
     if (!room.activeRound.slots.some((slot) => slot.type === "player" && slot.clientId)) {
       endRound(room, "empty");
     } else {

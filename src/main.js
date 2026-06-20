@@ -4840,6 +4840,7 @@ function renderPauseMenu() {
   pauseCopyEl.textContent = multiplayer
     ? "The online round keeps running while this menu is open."
     : "Solo play is paused until you resume.";
+  pauseMenuButton.classList.toggle("hidden", multiplayer);
   pauseDisconnectButton.classList.toggle("hidden", !multiplayerState.connected);
 }
 
@@ -5638,7 +5639,13 @@ startRoundButton.addEventListener("click", requestRoundStart);
 playAgainButton.addEventListener("click", returnToMenu);
 menuReturnButton.addEventListener("click", openPauseMenu);
 resumeGameButton.addEventListener("click", () => closePauseMenu());
-pauseMenuButton.addEventListener("click", returnToMenu);
+pauseMenuButton.addEventListener("click", () => {
+  if (multiplayerEnabled()) {
+    closePauseMenu({ restoreSolo: false });
+    return;
+  }
+  returnToMenu();
+});
 pauseDisconnectButton.addEventListener("click", disconnectFromPauseMenu);
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
