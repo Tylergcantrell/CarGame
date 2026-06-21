@@ -22,6 +22,9 @@ export function loadServerConfig(env = process.env) {
   if (production && allowedOrigins.length === 0 && env.REQUIRE_ALLOWED_ORIGINS !== "0") {
     throw new Error("SERVER_PROFILE=production requires ALLOWED_ORIGINS unless REQUIRE_ALLOWED_ORIGINS=0 is set.");
   }
+  if (production && !env.SESSION_SECRET && env.REQUIRE_SESSION_SECRET !== "0") {
+    throw new Error("SERVER_PROFILE=production requires SESSION_SECRET unless REQUIRE_SESSION_SECRET=0 is set.");
+  }
 
   const config = {
     profile,
@@ -29,7 +32,7 @@ export function loadServerConfig(env = process.env) {
     host: env.HOST ?? (production ? "0.0.0.0" : "127.0.0.1"),
     port: numberEnv(env, "PORT", 8787, { min: 1, max: 65535, integer: true }),
     maxCars: numberEnv(env, "MAX_CARS", 8, { min: 1, max: 16, integer: true }),
-    maxRooms: numberEnv(env, "MAX_ROOMS", 32, { min: 1, max: 512, integer: true }),
+    maxRooms: numberEnv(env, "MAX_ROOMS", production ? 4 : 32, { min: 1, max: 512, integer: true }),
     maxClientsPerRoom: numberEnv(env, "MAX_CLIENTS_PER_ROOM", 8, { min: 1, max: 16, integer: true }),
     minRoundTime: numberEnv(env, "MIN_ROUND_TIME", 30, { min: 10, max: 3600, integer: true }),
     maxRoundTime: numberEnv(env, "MAX_ROUND_TIME", 600, { min: 10, max: 7200, integer: true }),
@@ -40,6 +43,7 @@ export function loadServerConfig(env = process.env) {
     reconnectGraceMs: numberEnv(env, "RECONNECT_GRACE_MS", 45 * 1000, { min: 0, max: 10 * 60 * 1000, integer: true }),
     allowedOrigins,
     secureHeaders: env.SECURE_HEADERS !== "0",
+    sessionSecret: env.SESSION_SECRET ?? "local-development-session-secret",
   };
 
   if (config.minRoundTime > config.maxRoundTime) {

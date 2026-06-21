@@ -105,8 +105,23 @@ alice.ws.close();
 
 const reconnect = await connect({ name: "AliceAgain", roomCode: roomOne, sessionId: alice.sessionId });
 const acknowledged = snapshot.cars.find((entry) => entry.sessionId === alice.sessionId).inputSequence;
+
+const duplicateOne = await connect({ name: "DuplicateOne", roomCode: `D${roomOne.slice(1)}` });
+const duplicateTwo = await connect({ name: "DuplicateTwo", roomCode: `D${roomOne.slice(1)}`, sessionId: duplicateOne.sessionId });
+const duplicateState = duplicateTwo.state;
+duplicateTwo.ws.send(JSON.stringify({
+  type: "updateSettings",
+  settings: { roundTime: 30, carCount: 1, arena: "orange" },
+}));
+duplicateTwo.ws.send(JSON.stringify({ type: "startRound" }));
+const duplicateStarted = await duplicateTwo.waitFor((message) => (
+  message.type === "roundStarted" &&
+  message.roomCode === duplicateTwo.joined.roomCode
+));
+const duplicateSlotKeys = duplicateStarted.round.slots.map((slot) => slot.key);
+const duplicateSlotKeysUnique = new Set(duplicateSlotKeys).size === duplicateSlotKeys.length;
 const result = {
-  ok: true,
+  ok: duplicateState.clients.length === 1 && duplicateSlotKeysUnique,
   roomOne,
   roomTwo,
   roomOnePlayers: bob.state.clients.length,
@@ -115,10 +130,14 @@ const result = {
   snapshotCars: snapshot.cars.length,
   acknowledged,
   reconnectedSameSession: reconnect.sessionId === alice.sessionId,
+  duplicateSessionClients: duplicateState.clients.length,
+  duplicateSlotKeysUnique,
 };
 
 bob.ws.close();
 casey.ws.close();
 reconnect.ws.close();
+duplicateTwo.ws.close();
 
 console.log(JSON.stringify(result, null, 2));
+if (!result.ok) process.exit(1);

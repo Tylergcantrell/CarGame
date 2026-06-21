@@ -37,6 +37,12 @@ The WebSocket endpoint is the same host/port:
 ws://127.0.0.1:8787
 ```
 
+For a hosted frontend, set `VITE_MULTIPLAYER_URL` during the client build, for example:
+
+```bash
+VITE_MULTIPLAYER_URL=wss://your-backend.example npm run build
+```
+
 ## LAN Test Mode
 
 ```bash
@@ -94,18 +100,20 @@ SERVER_PROFILE=production
 HOST=0.0.0.0
 PORT=8787
 ALLOWED_ORIGINS=https://your-domain.example
-MAX_ROOMS=32
+SESSION_SECRET=replace-with-at-least-32-random-bytes
+MAX_ROOMS=4
 MAX_CLIENTS_PER_ROOM=8
+MAX_CARS=8
 TICK_RATE=60
 SNAPSHOT_RATE=30
 ```
 
-`SERVER_PROFILE=production` requires `ALLOWED_ORIGINS` by default. This is intentional: local mode can be open for same-machine testing, but the production switch should not accidentally accept WebSocket connections from arbitrary origins.
+`SERVER_PROFILE=production` requires `ALLOWED_ORIGINS` and `SESSION_SECRET` by default. This is intentional: local mode can be open for same-machine testing, but the production switch should not accidentally accept WebSocket connections from arbitrary origins or forged reconnect session tokens.
 
 For a local production-profile check:
 
 ```bash
-ALLOWED_ORIGINS=http://127.0.0.1:8787 npm run server:prod
+ALLOWED_ORIGINS=http://127.0.0.1:8787 SESSION_SECRET=local-prod-check-secret npm run server:prod
 ```
 
 ## Current Server Guarantees

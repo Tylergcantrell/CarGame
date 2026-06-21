@@ -2522,7 +2522,13 @@ const gameState = {
   pauseMenuOpen: false,
 };
 
-const defaultServerUrl = `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname || "127.0.0.1"}:8787`;
+const configuredServerUrl = String(
+  import.meta.env?.VITE_MULTIPLAYER_URL ??
+  window.CARTAG_MULTIPLAYER_URL ??
+  "",
+).trim();
+const defaultServerUrl = configuredServerUrl ||
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname || "127.0.0.1"}:8787`;
 const storedPlayerName = localStorage.getItem("carTagPlayerName") ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
 multiplayerNameInput.value = storedPlayerName;
 serverUrlInput.value = localStorage.getItem("carTagServerUrl") ?? defaultServerUrl;

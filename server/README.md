@@ -62,9 +62,10 @@ SERVER_PROFILE=production \
 HOST=0.0.0.0 \
 PORT=8787 \
 ALLOWED_ORIGINS=https://your-domain.example \
+SESSION_SECRET=$(openssl rand -base64 32) \
 npm run server:prod
 ```
 
-`SERVER_PROFILE=production` requires `ALLOWED_ORIGINS` by default so browser WebSocket origins are not open accidentally.
+`SERVER_PROFILE=production` requires `ALLOWED_ORIGINS` and `SESSION_SECRET` by default so browser WebSocket origins are not open accidentally and reconnect session tokens cannot be forged.
 
 Production config is validated on boot. Keep `MAX_CLIENTS_PER_ROOM <= MAX_CARS` and `SNAPSHOT_RATE <= TICK_RATE`; invalid values fail fast instead of running a degraded server.

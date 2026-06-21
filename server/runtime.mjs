@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { loadServerConfig } from "./config.mjs";
@@ -80,6 +80,26 @@ function sanitizeRoomVisibility(value) {
   return roomVisibilities.has(value) ? value : "private";
 }
 
+function signSessionId(id) {
+  return createHmac("sha256", config.sessionSecret).update(id).digest("base64url");
+}
+
+function createSessionId() {
+  const id = randomUUID();
+  return `${id}.${signSessionId(id)}`;
+}
+
+function validSessionId(value) {
+  const clean = String(value ?? "").trim();
+  const match = clean.match(/^([a-f0-9-]{36})\.([A-Za-z0-9_-]{43})$/i);
+  return Boolean(match && signSessionId(match[1]) === match[2]);
+}
+
+function sanitizeSessionId(value) {
+  const clean = String(value ?? "").trim().slice(0, 128);
+  return validSessionId(clean) ? clean : createSessionId();
+}
+
 function generateRoomCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -88,11 +108,6 @@ function generateRoomCode() {
     if (!rooms.has(code)) return code;
   }
   return randomUUID().slice(0, 6).toUpperCase();
-}
-
-function sanitizeSessionId(value) {
-  const clean = String(value ?? "").replace(/[^a-f0-9-]/gi, "").slice(0, 64);
-  return clean.length >= 16 ? clean : randomUUID();
 }
 
 function validOrigin(origin) {
@@ -288,7 +303,14 @@ function roundPlayerSessions(room) {
   return new Set(room.activeRound.slots.filter((slot) => slot.type === "player").map((slot) => slot.sessionId));
 }
 
-function publicRound(round) {
+function publicSlot(slot, selfSessionId = null) {
+  return {
+    ...slot,
+    sessionId: slot.sessionId && slot.sessionId === selfSessionId ? slot.sessionId : null,
+  };
+}
+
+function publicRound(round, selfSessionId = null) {
   if (!round) return null;
   return {
     id: round.id,
@@ -296,7 +318,7 @@ function publicRound(round) {
     playStartsAt: round.playStartsAt,
     endsAt: round.endsAt,
     settings: round.settings,
-    slots: round.slots,
+    slots: round.slots.map((slot) => publicSlot(slot, selfSessionId)),
   };
 }
 
@@ -329,6 +351,7 @@ function sendRoomList(client) {
 
 function publicState(room, selfId = null) {
   const inRound = roundPlayerSessions(room);
+  const selfClient = selfId ? room.clients.get(selfId) : null;
   return {
     type: "state",
     protocolVersion,
@@ -341,13 +364,14 @@ function publicState(room, selfId = null) {
     colors,
     clients: [...room.clients.values()].map((client) => ({
       id: client.id,
-      sessionId: client.sessionId,
+      publicId: client.publicId,
+      sessionId: client.id === selfId ? client.sessionId : null,
       name: client.name,
       color: client.color,
       isController: client.id === room.controllerId,
       inRound: inRound.has(client.sessionId),
     })),
-    round: publicRound(room.activeRound),
+    round: publicRound(room.activeRound, selfClient?.sessionId),
   };
 }
 
@@ -381,6 +405,23 @@ function roundCarsForSlots(round) {
   return round.slots
     .map((slot) => ({ slot, car: round.sim.cars.get(slot.key) }))
     .filter((entry) => entry.car);
+}
+
+function publicSnapshotForClient(snapshot, client) {
+  if (!snapshot || !client) return snapshot;
+  return {
+    ...snapshot,
+    cars: snapshot.cars.map((car) => ({
+      ...car,
+      sessionId: car.sessionId === client.sessionId ? car.sessionId : null,
+    })),
+  };
+}
+
+function broadcastSnapshot(room, snapshot) {
+  for (const client of room.clients.values()) {
+    send(client, publicSnapshotForClient(snapshot, client));
+  }
 }
 
 function reassignItFromSlot(room, departingSlot) {
@@ -433,16 +474,22 @@ function convertRoundSlotToAi(room, slot, { keepSession = true } = {}) {
 function buildRoundSlots(room, roundSettings) {
   const players = [...room.clients.values()];
   const usedColors = new Set();
-  const slots = players.map((client) => {
+  const usedSessions = new Set();
+  const slots = players.flatMap((client) => {
+    if (usedSessions.has(client.sessionId)) return [];
+    usedSessions.add(client.sessionId);
     usedColors.add(client.color);
-    return {
-      key: `player:${client.sessionId}`,
+    const publicId = client.publicId ?? randomUUID();
+    client.publicId = publicId;
+    return [{
+      key: `player:${publicId}`,
       type: "player",
       clientId: client.id,
       sessionId: client.sessionId,
+      publicId,
       name: client.name,
       color: client.color,
-    };
+    }];
   });
 
   let aiIndex = 1;
@@ -482,7 +529,7 @@ function maybeBroadcastSnapshot(room, round, now) {
   if (snapshot) {
     room.snapshots += 1;
     metrics.snapshots += 1;
-    broadcast(room, snapshot);
+    broadcastSnapshot(room, snapshot);
   }
 }
 
@@ -497,12 +544,15 @@ function endRound(room, reason = "timer") {
   room.activeRound = null;
   room.settings = normalizeSettings(room, room.settings);
   metrics.roundsEnded += 1;
-  broadcast(room, {
-    type: "roundEnded",
-    roomCode: room.code,
-    roundId: endedRound.id,
-    reason,
-    snapshot: finalSnapshot,
+  broadcast(room, (selfId) => {
+    const client = room.clients.get(selfId);
+    return {
+      type: "roundEnded",
+      roomCode: room.code,
+      roundId: endedRound.id,
+      reason,
+      snapshot: publicSnapshotForClient(finalSnapshot, client),
+    };
   });
   broadcastState(room);
   destroyRoomIfEmpty(room);
@@ -530,11 +580,11 @@ function startRound(room, client) {
   room.lastActiveAt = nowMs();
   room.roundsStarted += 1;
   metrics.roundsStarted += 1;
-  broadcast(room, {
+  broadcast(room, (selfId) => ({
     type: "roundStarted",
     roomCode: room.code,
-    round: publicRound(room.activeRound),
-  });
+    round: publicRound(room.activeRound, room.clients.get(selfId)?.sessionId),
+  }));
   broadcastState(room);
 }
 
@@ -560,6 +610,7 @@ function leaveRoom(client, { removeRoundSlot = true } = {}) {
   if (!room) return;
   room.clients.delete(client.id);
   room.sessions.set(client.sessionId, {
+    publicId: client.publicId,
     name: client.name,
     color: client.color,
     lastSeenAt: nowMs(),
@@ -580,12 +631,25 @@ function leaveRoom(client, { removeRoundSlot = true } = {}) {
 
 function joinRoom(client, room, requestedName) {
   if (client.room && client.room !== room) leaveRoom(client);
-  if (room.clients.size >= config.maxClientsPerRoom && !room.clients.has(client.id)) {
+  for (const existing of clients.values()) {
+    if (existing.id === client.id || existing.sessionId !== client.sessionId || existing.room === room) continue;
+    leaveRoom(existing, { removeRoundSlot: false });
+    existing.ws.close(4001, "Session continued in another connection.");
+  }
+  const existingSessionClient = [...room.clients.values()]
+    .find((entry) => entry.id !== client.id && entry.sessionId === client.sessionId);
+  const roomSizeAfterHandoff = room.clients.size - (existingSessionClient ? 1 : 0);
+  if (roomSizeAfterHandoff >= config.maxClientsPerRoom && !room.clients.has(client.id)) {
     send(client, { type: "error", code: "room_full", message: "Room is full." });
     return false;
   }
+  if (existingSessionClient) {
+    leaveRoom(existingSessionClient, { removeRoundSlot: false });
+    existingSessionClient.ws.close(4001, "Session continued in another connection.");
+  }
 
   const session = room.sessions.get(client.sessionId);
+  client.publicId = session?.publicId ?? client.publicId ?? randomUUID();
   client.name = sanitizeName(requestedName ?? session?.name ?? client.name);
   client.color = session?.color && !colorTakenByOther(room, session.color, client.sessionId)
     ? session.color
@@ -593,6 +657,7 @@ function joinRoom(client, room, requestedName) {
   client.room = room;
   room.clients.set(client.id, client);
   room.sessions.set(client.sessionId, {
+    publicId: client.publicId,
     name: client.name,
     color: client.color,
     lastSeenAt: nowMs(),
@@ -603,6 +668,7 @@ function joinRoom(client, room, requestedName) {
     if (slot) {
       slot.type = "player";
       slot.clientId = client.id;
+      slot.publicId = client.publicId;
       slot.name = client.name;
       slot.color = client.color;
     }
@@ -776,7 +842,8 @@ wss.on("connection", (ws) => {
   metrics.totalConnections += 1;
   const client = {
     id: randomUUID(),
-    sessionId: randomUUID(),
+    sessionId: createSessionId(),
+    publicId: randomUUID(),
     ws,
     room: null,
     name: "Player",
