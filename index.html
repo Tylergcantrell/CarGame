@@ -25,36 +25,61 @@
           <div class="multiplayer-panel hidden" id="multiplayer-panel">
             <div class="multiplayer-head">
               <div>
-                <strong id="multiplayer-title">Online Rooms</strong>
-                <span id="multiplayer-subtitle">Live matchmaking</span>
+                <strong id="multiplayer-title">Online Play</strong>
+                <span id="multiplayer-subtitle">Join a room or create your own</span>
               </div>
               <div class="connection-pill" id="connection-pill">Online</div>
             </div>
-            <div class="connection-row">
+            <div class="connection-row" id="profile-row">
               <label id="name-field">
                 <span>Driver</span>
                 <input id="multiplayer-name" type="text" maxlength="18" autocomplete="off" />
               </label>
-              <label id="room-code-field">
-                <span>Private Code</span>
-                <input id="room-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" />
-              </label>
               <button class="secondary-action danger-action" id="connect-server" type="button">Leave Room</button>
             </div>
-            <div class="room-actions" id="room-actions">
-              <label>
-                <span>Access</span>
-                <select id="room-visibility">
-                  <option value="public" selected>Public</option>
-                  <option value="private">Private</option>
-                </select>
-              </label>
-              <button class="secondary-action" id="create-room" type="button">Quick Play</button>
-              <button class="secondary-action" id="join-room" type="button">Join Private</button>
-              <button class="secondary-action" id="refresh-rooms" type="button">Refresh</button>
+            <div class="multiplayer-section" id="private-room-section">
+              <div class="section-head">
+                <strong>Private Room</strong>
+              </div>
+              <div class="private-room-row">
+                <label id="room-code-field">
+                  <span>Room Code</span>
+                  <input id="room-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+                </label>
+                <button class="secondary-action" id="join-room" type="button">Join</button>
+              </div>
+            </div>
+            <div class="multiplayer-section" id="public-room-section">
+              <div class="section-head">
+                <strong>Public Rooms</strong>
+                <button class="secondary-action compact-action" id="refresh-rooms" type="button">Refresh</button>
+              </div>
+              <div class="room-browser" id="room-browser"></div>
+            </div>
+            <button class="secondary-action create-toggle" id="create-room-open" type="button">Create Room</button>
+            <div class="multiplayer-section create-room-panel hidden" id="create-room-panel">
+              <div class="section-head">
+                <strong>Create Room</strong>
+              </div>
+              <div class="create-room-grid">
+                <label>
+                  <span>Room Code</span>
+                  <input id="create-room-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+                </label>
+                <label>
+                  <span>Access</span>
+                  <select id="room-visibility">
+                    <option value="public" selected>Public</option>
+                    <option value="private">Private</option>
+                  </select>
+                </label>
+              </div>
+              <div class="create-room-actions">
+                <button class="secondary-action" id="create-room" type="button">Create</button>
+                <button class="secondary-action" id="create-room-cancel" type="button">Cancel</button>
+              </div>
             </div>
             <div class="lobby-status" id="lobby-status">Online</div>
-            <div class="room-browser" id="room-browser"></div>
             <div class="room-summary hidden" id="room-summary"></div>
             <div class="lobby-list" id="lobby-list"></div>
           </div>
@@ -114,6 +139,10 @@
         <p class="eyebrow" id="pause-eyebrow">Paused</p>
         <h2 id="pause-title">Game Paused</h2>
         <p id="pause-copy">Solo play is paused.</p>
+        <details class="network-details hidden" id="pause-network-details">
+          <summary>Network</summary>
+          <div class="network-grid" id="pause-network-metrics"></div>
+        </details>
         <div class="pause-actions">
           <button class="primary-action" id="resume-game" type="button">Resume</button>
           <button class="secondary-action" id="pause-menu" type="button">Menu</button>
@@ -132,6 +161,7 @@
         <div class="leaderboard" id="leaderboard"></div>
       </div>
       <div class="round-actions">
+        <div class="network-hud hidden" id="network-hud">-- ms</div>
         <div class="timer" id="round-timer">2:00</div>
         <button class="menu-return" id="menu-return" type="button" aria-label="Back to menu">Menu</button>
       </div>

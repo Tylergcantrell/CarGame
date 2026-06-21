@@ -57,7 +57,7 @@ body {
 }
 
 .hidden {
-  display: none;
+  display: none !important;
 }
 
 .menu-shell {
@@ -281,12 +281,14 @@ body[data-phase="ended"] .jump-button {
 
 .connection-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(128px, 0.7fr) auto;
+  grid-template-columns: minmax(150px, 1fr) auto;
   gap: 8px;
   align-items: end;
 }
 
-.connection-row label {
+.connection-row label,
+.private-room-row label,
+.create-room-grid label {
   display: grid;
   gap: 7px;
   color: #b8c2b9;
@@ -296,7 +298,9 @@ body[data-phase="ended"] .jump-button {
   text-transform: uppercase;
 }
 
-.connection-row input {
+.connection-row input,
+.private-room-row input,
+.create-room-grid input {
   width: 100%;
   min-height: 42px;
   border: 1px solid rgba(255, 138, 42, 0.28);
@@ -311,24 +315,61 @@ body[data-phase="ended"] .jump-button {
   box-shadow: inset 0 0 12px rgba(255, 209, 118, 0.04);
 }
 
-.room-actions {
+.multiplayer-section {
   display: grid;
-  grid-template-columns: minmax(120px, 0.72fr) minmax(120px, 1fr) minmax(130px, 1fr) minmax(96px, 0.72fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 138, 42, 0.16);
+  border-radius: 6px;
+  background: rgba(8, 6, 5, 0.36);
+}
+
+.multiplayer-section.hidden,
+.create-toggle.hidden {
+  display: none;
+}
+
+.section-head {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.section-head strong {
+  color: #fff0a8;
+  font-size: 12px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.private-room-row,
+.create-room-grid,
+.create-room-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: end;
 }
 
-.room-actions label {
-  display: grid;
-  gap: 7px;
-  color: #b8c2b9;
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+.create-room-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.45fr);
 }
 
-.room-actions select {
+.create-room-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compact-action {
+  min-width: 96px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 10px;
+}
+
+.create-room-grid select {
   width: 100%;
   min-height: 42px;
   border: 1px solid rgba(255, 138, 42, 0.28);
@@ -697,6 +738,38 @@ body[data-phase="ended"] .jump-button {
   line-height: 1.45;
 }
 
+.network-details {
+  margin: 0 0 14px;
+  border: 1px solid rgba(47, 216, 196, 0.18);
+  border-radius: 6px;
+  background: rgba(8, 6, 5, 0.42);
+}
+
+.network-details summary {
+  cursor: pointer;
+  padding: 9px 10px;
+  color: #9edec5;
+  font-size: 11px;
+  font-weight: 950;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.network-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px 12px;
+  padding: 0 10px 10px;
+  color: #b8c2b9;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.network-grid strong {
+  color: #fff0a8;
+  font-variant-numeric: tabular-nums;
+}
+
 .pause-actions {
   display: grid;
   gap: 8px;
@@ -789,7 +862,9 @@ body[data-phase="ended"] .jump-button {
     grid-template-columns: 1fr;
   }
 
-  .room-actions {
+  .private-room-row,
+  .create-room-grid,
+  .create-room-actions {
     grid-template-columns: 1fr;
   }
 
@@ -826,6 +901,19 @@ body[data-phase="ended"] .jump-button {
   gap: 7px;
   min-width: 112px;
   pointer-events: auto;
+}
+
+.network-hud {
+  min-width: 70px;
+  padding: 5px 8px;
+  border: 1px solid rgba(47, 216, 196, 0.22);
+  border-radius: 7px;
+  background: rgba(8, 6, 5, 0.52);
+  color: #9edec5;
+  font-size: 11px;
+  font-weight: 950;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .timer {

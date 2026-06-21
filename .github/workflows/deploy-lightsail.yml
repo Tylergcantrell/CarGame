@@ -24,8 +24,41 @@ jobs:
     env:
       LIGHTSAIL_HOST: 3.12.211.2
       LIGHTSAIL_USER: deploy
-      DEPLOY_COMMAND: /usr/local/bin/cartag-deploy
+      ARCHIVE_PATH: /tmp/cartag-${{ github.sha }}.tgz
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build server bundle
+        run: npm run build:server
+
+      - name: Run multiplayer smoke check
+        run: npm run check:multiplayer
+
+      - name: Create release archive
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='server/.env.production' \
+            --exclude='tmp-*' \
+            --exclude='.cache' \
+            --exclude='cache' \
+            -czf cartag-${{ github.sha }}.tgz \
+            package.json \
+            package-lock.json \
+            server
+
       - name: Configure SSH
         run: |
           set -euo pipefail
@@ -34,10 +67,26 @@ jobs:
           chmod 600 ~/.ssh/cartag_lightsail
           ssh-keyscan -H "$LIGHTSAIL_HOST" >> ~/.ssh/known_hosts
 
+      - name: Upload release archive
+        run: |
+          set -euo pipefail
+          scp -i ~/.ssh/cartag_lightsail \
+            -o IdentitiesOnly=yes \
+            cartag-${{ github.sha }}.tgz \
+            "${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}:${ARCHIVE_PATH}"
+
       - name: Deploy on Lightsail
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/cartag_lightsail \
             -o IdentitiesOnly=yes \
-            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" \
-            "$DEPLOY_COMMAND"
+            "${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}" \
+            "sudo -n /usr/local/bin/cartag-deploy $ARCHIVE_PATH"
+
+      - name: Verify remote health
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/cartag_lightsail \
+            -o IdentitiesOnly=yes \
+            "${LIGHTSAIL_USER}@${LIGHTSAIL_HOST}" \
+            "curl -fsS http://127.0.0.1:8787/healthz"

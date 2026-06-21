@@ -2469,14 +2469,19 @@ const multiplayerSubtitleEl = document.querySelector("#multiplayer-subtitle");
 const connectionPillEl = document.querySelector("#connection-pill");
 const multiplayerNameInput = document.querySelector("#multiplayer-name");
 const roomCodeInput = document.querySelector("#room-code");
+const createRoomCodeInput = document.querySelector("#create-room-code");
 const nameFieldEl = document.querySelector("#name-field");
 const roomCodeFieldEl = document.querySelector("#room-code-field");
 const connectServerButton = document.querySelector("#connect-server");
 const roomVisibilitySelect = document.querySelector("#room-visibility");
+const createRoomOpenButton = document.querySelector("#create-room-open");
 const createRoomButton = document.querySelector("#create-room");
+const createRoomCancelButton = document.querySelector("#create-room-cancel");
 const joinRoomButton = document.querySelector("#join-room");
 const refreshRoomsButton = document.querySelector("#refresh-rooms");
-const roomActionsEl = document.querySelector("#room-actions");
+const privateRoomSectionEl = document.querySelector("#private-room-section");
+const publicRoomSectionEl = document.querySelector("#public-room-section");
+const createRoomPanelEl = document.querySelector("#create-room-panel");
 const roomBrowserEl = document.querySelector("#room-browser");
 const roomSummaryEl = document.querySelector("#room-summary");
 const lobbyStatusEl = document.querySelector("#lobby-status");
@@ -2491,9 +2496,12 @@ const pauseScreenEl = document.querySelector("#pause-screen");
 const pauseEyebrowEl = document.querySelector("#pause-eyebrow");
 const pauseTitleEl = document.querySelector("#pause-title");
 const pauseCopyEl = document.querySelector("#pause-copy");
+const pauseNetworkDetailsEl = document.querySelector("#pause-network-details");
+const pauseNetworkMetricsEl = document.querySelector("#pause-network-metrics");
 const resumeGameButton = document.querySelector("#resume-game");
 const pauseMenuButton = document.querySelector("#pause-menu");
 const pauseDisconnectButton = document.querySelector("#pause-disconnect");
+const networkHudEl = document.querySelector("#network-hud");
 
 installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl });
 
@@ -2530,6 +2538,7 @@ const defaultServerUrl = configuredServerUrl ||
 const storedPlayerName = localStorage.getItem("carTagPlayerName") ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
 multiplayerNameInput.value = storedPlayerName;
 roomCodeInput.value = localStorage.getItem("carTagRoomCode") ?? "";
+createRoomCodeInput.value = "";
 roomVisibilitySelect.value = localStorage.getItem("carTagRoomVisibility") ?? "public";
 
 const multiplayerState = {
@@ -2548,6 +2557,10 @@ const multiplayerState = {
   phase: "lobby",
   clients: [],
   publicRooms: [],
+  roomCount: 0,
+  maxRooms: 4,
+  maxPlayers: 8,
+  createRoomOpen: false,
   lastRoomListRequestAt: 0,
   settings: {
     roundTime: 120,
@@ -2563,6 +2576,14 @@ const multiplayerState = {
   predictionInputHistory: [],
   acknowledgedInputSequence: 0,
   localServerSnapshot: null,
+  lastSnapshotAt: 0,
+  snapshotIntervals: [],
+  pingSequence: 0,
+  pingSentAt: 0,
+  lastPingAt: 0,
+  pingMs: null,
+  jitterMs: null,
+  lastPongAt: 0,
   predictionStats: {
     rebuilds: 0,
     maxCorrection: 0,
@@ -3220,6 +3241,81 @@ function requestRoomList({ force = false } = {}) {
   sendServerMessage({ type: "listRooms" });
 }
 
+function sendNetworkPing({ force = false } = {}) {
+  if (!multiplayerEnabled() || !multiplayerState.connected) return;
+  const now = performance.now();
+  if (!force && now - multiplayerState.lastPingAt < 2000) return;
+  multiplayerState.lastPingAt = now;
+  multiplayerState.pingSentAt = now;
+  multiplayerState.pingSequence += 1;
+  sendServerMessage({
+    type: "ping",
+    clientTime: now,
+    sequence: multiplayerState.pingSequence,
+  });
+}
+
+function recordNetworkPong(message) {
+  const sentAt = Number(message.clientTime) || multiplayerState.pingSentAt;
+  const rtt = Math.max(0, performance.now() - sentAt);
+  if (Number.isFinite(multiplayerState.pingMs)) {
+    const instantJitter = Math.abs(rtt - multiplayerState.pingMs);
+    multiplayerState.jitterMs = Number.isFinite(multiplayerState.jitterMs)
+      ? multiplayerState.jitterMs * 0.82 + instantJitter * 0.18
+      : instantJitter;
+    multiplayerState.pingMs = multiplayerState.pingMs * 0.7 + rtt * 0.3;
+  } else {
+    multiplayerState.pingMs = rtt;
+    multiplayerState.jitterMs = 0;
+  }
+  multiplayerState.lastPongAt = performance.now();
+}
+
+function averageSnapshotMs() {
+  const intervals = multiplayerState.snapshotIntervals;
+  if (!intervals.length) return null;
+  return intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
+}
+
+function networkQualityLabel() {
+  const ping = multiplayerState.pingMs;
+  const jitter = multiplayerState.jitterMs;
+  if (!Number.isFinite(ping)) return "Connecting";
+  if (ping <= 80 && jitter <= 20) return "Good";
+  if (ping <= 140 && jitter <= 45) return "Fair";
+  return "Poor";
+}
+
+function updateNetworkUi() {
+  const show = multiplayerEnabled() && multiplayerState.connected;
+  networkHudEl.classList.toggle("hidden", !show);
+  if (!show) return;
+
+  const ping = Number.isFinite(multiplayerState.pingMs) ? Math.round(multiplayerState.pingMs) : null;
+  networkHudEl.textContent = ping === null ? "-- ms" : `${ping} ms`;
+
+  const avgSnapshot = averageSnapshotMs();
+  const snapshotHz = avgSnapshot ? 1000 / avgSnapshot : null;
+  const lastSnapshotAgo = multiplayerState.lastSnapshotAt ? performance.now() - multiplayerState.lastSnapshotAt : null;
+  pauseNetworkMetricsEl.innerHTML = `
+    <span>Quality</span><strong>${networkQualityLabel()}</strong>
+    <span>Ping</span><strong>${ping === null ? "--" : `${ping} ms`}</strong>
+    <span>Jitter</span><strong>${Number.isFinite(multiplayerState.jitterMs) ? `${Math.round(multiplayerState.jitterMs)} ms` : "--"}</strong>
+    <span>Snapshots</span><strong>${snapshotHz ? `${snapshotHz.toFixed(1)} Hz` : "--"}</strong>
+    <span>Last Update</span><strong>${lastSnapshotAgo === null ? "--" : `${Math.round(lastSnapshotAgo)} ms`}</strong>
+    <span>Input Ack</span><strong>${multiplayerState.acknowledgedInputSequence}</strong>
+  `;
+}
+
+function maxRoomsReached() {
+  return multiplayerState.roomCount >= multiplayerState.maxRooms;
+}
+
+function setCreateRoomOpen(open) {
+  multiplayerState.createRoomOpen = Boolean(open) && !maxRoomsReached() && !isInMultiplayerRoom();
+  updateMultiplayerControls();
+}
+
 function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selectedRoomVisibility() } = {}) {
   const cleanRoomCode = String(roomCode ?? "").trim().toUpperCase();
   const roomVisibility = visibility === "private" ? "private" : "public";
@@ -3230,11 +3326,13 @@ function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selecte
 
   if (!multiplayerState.connected) {
     multiplayerState.manualDisconnect = false;
+    multiplayerState.createRoomOpen = false;
     connectMultiplayer({ roomCode: cleanRoomCode, visibility: roomVisibility });
     return;
   }
 
-  lobbyStatusEl.textContent = cleanRoomCode ? `Joining room ${cleanRoomCode}...` : "Creating room...";
+  multiplayerState.createRoomOpen = false;
+  lobbyStatusEl.textContent = cleanRoomCode ? `Joining ${cleanRoomCode}...` : "Creating room...";
   sendServerMessage({
     type: "joinRoom",
     name: currentPlayerName(),
@@ -3244,7 +3342,12 @@ function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selecte
 }
 
 function createRoomOnServer() {
-  joinRoomOnServer({ roomCode: "", visibility: selectedRoomVisibility() });
+  if (maxRoomsReached()) {
+    lobbyStatusEl.textContent = `${multiplayerState.maxRooms} rooms are live. Join an existing room.`;
+    setCreateRoomOpen(false);
+    return;
+  }
+  joinRoomOnServer({ roomCode: createRoomCodeInput.value, visibility: selectedRoomVisibility() });
 }
 
 function joinCodeRoomOnServer() {
@@ -3270,6 +3373,7 @@ function leaveCurrentRoom() {
   multiplayerState.round = null;
   multiplayerState.activeRoundId = null;
   multiplayerState.lastConnectionOptions = { lobbyOnly: true, roomCode: "", visibility: selectedRoomVisibility() };
+  multiplayerState.createRoomOpen = false;
   if (gameState.phase !== "menu") returnToMenu({ notifyServer: false });
   sendServerMessage({ type: "leaveRoom" });
   renderColorPicker();
@@ -3288,7 +3392,7 @@ function renderRoomBrowser() {
   if (!rooms.length) {
     const empty = document.createElement("div");
     empty.className = "room-empty";
-    empty.textContent = "No public rooms";
+    empty.textContent = "No public rooms open";
     roomBrowserEl.append(empty);
     return;
   }
@@ -3302,7 +3406,7 @@ function renderRoomBrowser() {
     title.textContent = room.phase === "round" ? `Room ${room.code} - playing` : `Room ${room.code} - waiting`;
     const secondsLeft = room.roundEndsAt ? ` - ${formatTime((room.roundEndsAt - Date.now()) / 1000)} left` : "";
     const detail = document.createElement("span");
-    detail.textContent = `${room.playerCount}/${room.maxPlayers} players - ${room.settings.carCount} cars${secondsLeft}`;
+    detail.textContent = `${room.playerCount}/${room.maxPlayers ?? multiplayerState.maxPlayers} players - ${room.settings.carCount} cars${secondsLeft}`;
     const join = document.createElement("button");
     join.className = "secondary-action";
     join.type = "button";
@@ -3336,11 +3440,11 @@ function renderRoomSummary() {
     ? formatTime((multiplayerState.round.endsAt - Date.now()) / 1000)
     : formatTime(multiplayerState.settings.roundTime);
   const playerCount = multiplayerState.clients.length;
-  const carCount = Math.max(multiplayerState.settings.carCount, playerCount);
+  const maxPlayers = multiplayerState.maxPlayers ?? 8;
 
   appendRoomSummaryItem("Room", multiplayerState.roomCode || "------");
   appendRoomSummaryItem("Host", controller?.name ?? "Host");
-  appendRoomSummaryItem("Players", `${playerCount}/${carCount}`);
+  appendRoomSummaryItem("Players", `${playerCount}/${maxPlayers}`);
   appendRoomSummaryItem("State", phaseLabel);
   appendRoomSummaryItem("Round", secondsLeft);
   appendRoomSummaryItem("Access", multiplayerState.roomVisibility === "private" ? "Private" : "Public");
@@ -3657,6 +3761,8 @@ function resetNetworkCars() {
   gameState.networkCars = [];
   gameState.networkCarByKey.clear();
   multiplayerState.localServerSnapshot = null;
+  multiplayerState.lastSnapshotAt = 0;
+  multiplayerState.snapshotIntervals = [];
   multiplayerState.acknowledgedInputSequence = 0;
   multiplayerState.inputSequence = 0;
   multiplayerState.lastInputSentAt = 0;
@@ -3769,6 +3875,12 @@ function reconcileLocalPlayer(dt) {
 
 function applyServerSnapshot(snapshot) {
   if (!snapshot || snapshot.roundId !== multiplayerState.activeRoundId) return;
+  const receivedAt = performance.now();
+  if (multiplayerState.lastSnapshotAt) {
+    multiplayerState.snapshotIntervals.push(receivedAt - multiplayerState.lastSnapshotAt);
+    if (multiplayerState.snapshotIntervals.length > 30) multiplayerState.snapshotIntervals.shift();
+  }
+  multiplayerState.lastSnapshotAt = receivedAt;
   gameState.timeRemaining = snapshot.remainingMs / 1000;
   let itCar = null;
   let sawLocalSnapshot = false;
@@ -3829,6 +3941,7 @@ function updateMultiplayerControls() {
   const canEditSettings = !multiplayerEnabled() || (inRoom && isRoomController() && multiplayerState.phase === "lobby");
   const showSetup = !multiplayerEnabled() || canEditSettings;
   const showColor = !multiplayerEnabled() || (inRoom && multiplayerState.phase === "lobby");
+  const roomsFull = multiplayerEnabled() && maxRoomsReached();
 
   if (multiplayerEnabled()) {
     const stateLabel = !multiplayerState.connected
@@ -3841,7 +3954,7 @@ function updateMultiplayerControls() {
     connectionPillEl.textContent = stateLabel;
     multiplayerTitleEl.textContent = browsingRooms ? "Online Play" : `Room ${multiplayerState.roomCode}`;
     multiplayerSubtitleEl.textContent = browsingRooms
-      ? "Public rooms and private codes"
+      ? roomsFull ? `${multiplayerState.maxRooms} rooms live` : "Private codes and public rooms"
       : inRound
         ? selfInRound ? "Round live" : "Next round"
         : isRoomController() ? "Host controls" : "Lobby";
@@ -3854,13 +3967,22 @@ function updateMultiplayerControls() {
   connectServerButton.textContent = "Leave Room";
   roomCodeInput.disabled = inRoom;
   roomVisibilitySelect.disabled = !multiplayerState.connected || inRoom;
-  createRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom;
+  createRoomOpenButton.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
+  createRoomOpenButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || roomsFull;
+  createRoomOpenButton.textContent = roomsFull ? `${multiplayerState.maxRooms} Rooms Live` : "Create Room";
+  createRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom || roomsFull;
+  createRoomPanelEl.classList.toggle("hidden", inRoom || !multiplayerState.createRoomOpen);
+  privateRoomSectionEl.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
+  publicRoomSectionEl.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
   joinRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom || !roomCodeInput.value.trim();
   refreshRoomsButton.disabled = !multiplayerEnabled() || !multiplayerState.connected;
-  roomActionsEl.classList.toggle("hidden", inRoom);
   roomBrowserEl.classList.toggle("hidden", inRoom);
   roomSummaryEl.classList.toggle("hidden", !inRoom);
   lobbyListEl.classList.toggle("hidden", !inRoom);
+  lobbyStatusEl.classList.toggle(
+    "hidden",
+    browsingRooms && multiplayerState.connected && !roomsFull && lobbyStatusEl.textContent === "Choose a room",
+  );
   setupGridEl.classList.toggle("hidden", !showSetup);
   colorSectionEl.classList.toggle("hidden", !showColor);
   startRoundButton.classList.toggle("hidden", multiplayerEnabled() && (!inRoom || !isRoomController() || multiplayerState.phase !== "lobby"));
@@ -3903,7 +4025,9 @@ function renderMultiplayerLobby() {
     return;
   }
   if (!isInMultiplayerRoom()) {
-    lobbyStatusEl.textContent = "Choose a room";
+    lobbyStatusEl.textContent = maxRoomsReached()
+      ? `${multiplayerState.maxRooms} rooms are live. Join an existing room.`
+      : "Choose a room";
     lobbyListEl.innerHTML = "";
     roomSummaryEl.innerHTML = "";
     renderRoomBrowser();
@@ -3979,6 +4103,9 @@ function applyServerState(state) {
   multiplayerState.selfId = state.selfId ?? multiplayerState.selfId;
   multiplayerState.roomCode = state.roomCode ?? multiplayerState.roomCode;
   multiplayerState.roomVisibility = state.roomVisibility ?? multiplayerState.roomVisibility;
+  if (Number.isFinite(state.roomCount)) multiplayerState.roomCount = state.roomCount;
+  if (Number.isFinite(state.maxRooms)) multiplayerState.maxRooms = state.maxRooms;
+  if (Number.isFinite(state.maxPlayers)) multiplayerState.maxPlayers = state.maxPlayers;
   multiplayerState.controllerId = state.controllerId;
   multiplayerState.phase = state.phase;
   multiplayerState.clients = state.clients ?? [];
@@ -4052,6 +4179,7 @@ function connectMultiplayer(options = {}) {
       lobbyOnly,
       sessionId: multiplayerState.sessionId,
     });
+    sendNetworkPing({ force: true });
     renderMultiplayerLobby();
   });
 
@@ -4089,6 +4217,9 @@ function connectMultiplayer(options = {}) {
     }
     if (message.type === "error") {
       lobbyStatusEl.textContent = message.message ?? "Matchmaking error";
+      if (Number.isFinite(message.roomCount)) multiplayerState.roomCount = message.roomCount;
+      if (Number.isFinite(message.maxRooms)) multiplayerState.maxRooms = message.maxRooms;
+      updateMultiplayerControls();
       if (message.code === "protocol_mismatch") {
         multiplayerState.manualDisconnect = true;
         socket.close();
@@ -4097,7 +4228,16 @@ function connectMultiplayer(options = {}) {
     }
     if (message.type === "roomList") {
       multiplayerState.publicRooms = message.rooms ?? [];
+      if (Number.isFinite(message.roomCount)) multiplayerState.roomCount = message.roomCount;
+      if (Number.isFinite(message.maxRooms)) multiplayerState.maxRooms = message.maxRooms;
+      if (Number.isFinite(message.maxPlayers)) multiplayerState.maxPlayers = message.maxPlayers;
       renderRoomBrowser();
+      updateMultiplayerControls();
+      return;
+    }
+    if (message.type === "pong") {
+      recordNetworkPong(message);
+      updateNetworkUi();
       return;
     }
     if (message.type === "state") {
@@ -4163,6 +4303,7 @@ function disconnectMultiplayer() {
   multiplayerState.lastConnectionOptions = null;
   multiplayerState.round = null;
   multiplayerState.activeRoundId = null;
+  multiplayerState.createRoomOpen = false;
   renderColorPicker();
   renderMultiplayerLobby();
 }
@@ -4170,6 +4311,7 @@ function disconnectMultiplayer() {
 function setGameMode(mode) {
   closePauseMenu({ restoreSolo: false });
   multiplayerState.mode = mode;
+  if (mode === "solo") multiplayerState.createRoomOpen = false;
   if (mode === "solo" && multiplayerState.connected) disconnectMultiplayer();
   if (mode === "multiplayer" && !multiplayerState.connected) connectMultiplayer({ lobbyOnly: true });
   renderColorPicker();
@@ -4795,6 +4937,7 @@ function endRound(options = {}) {
     `;
     resultsListEl.append(item);
   });
+  playAgainButton.classList.toggle("hidden", multiplayerEnabled());
   endScreenEl.classList.remove("hidden");
   if (options.autoReturnToLobby) showMultiplayerScoreboardThenLobby();
 }
@@ -4836,6 +4979,8 @@ function renderPauseMenu() {
   pauseCopyEl.textContent = multiplayer
     ? "The online round keeps running while this menu is open."
     : "Solo play is paused until you resume.";
+  pauseNetworkDetailsEl.classList.toggle("hidden", !multiplayer);
+  if (multiplayer) updateNetworkUi();
   pauseMenuButton.classList.toggle("hidden", multiplayer);
   pauseDisconnectButton.classList.toggle("hidden", !multiplayerState.connected);
 }
@@ -5090,6 +5235,7 @@ function updateHud() {
     hudCache.boostValueText = boostValueText;
     boostValueEl.textContent = boostValueText;
   }
+  updateNetworkUi();
   updateLeaderboard();
 }
 
@@ -5599,7 +5745,9 @@ arenaSelect.addEventListener("change", handleSetupChanged);
 modeSoloButton.addEventListener("click", () => setGameMode("solo"));
 modeMultiplayerButton.addEventListener("click", () => setGameMode("multiplayer"));
 connectServerButton.addEventListener("click", leaveCurrentRoom);
+createRoomOpenButton.addEventListener("click", () => setCreateRoomOpen(true));
 createRoomButton.addEventListener("click", createRoomOnServer);
+createRoomCancelButton.addEventListener("click", () => setCreateRoomOpen(false));
 joinRoomButton.addEventListener("click", joinCodeRoomOnServer);
 refreshRoomsButton.addEventListener("click", () => requestRoomList({ force: true }));
 multiplayerNameInput.addEventListener("change", () => {
@@ -5619,6 +5767,9 @@ roomCodeInput.addEventListener("change", () => {
   } else {
     localStorage.removeItem("carTagRoomCode");
   }
+});
+createRoomCodeInput.addEventListener("input", () => {
+  createRoomCodeInput.value = createRoomCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
 });
 roomVisibilitySelect.addEventListener("change", () => {
   const visibility = selectedRoomVisibility();
@@ -5651,6 +5802,7 @@ renderColorPicker();
 renderMultiplayerLobby();
 updateMultiplayerControls();
 setInterval(renderMultiplayerLobby, 500);
+setInterval(sendNetworkPing, 2000);
 setUiPhase("menu");
 spawnCarAt(playerCar, getArenaSpawnPoints()[0]);
 gameState.timeRemaining = Number(roundTimeSelect.value);

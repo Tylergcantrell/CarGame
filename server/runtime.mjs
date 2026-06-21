@@ -346,7 +346,13 @@ function publicRoomList() {
 }
 
 function sendRoomList(client) {
-  send(client, { type: "roomList", rooms: publicRoomList() });
+  send(client, {
+    type: "roomList",
+    rooms: publicRoomList(),
+    roomCount: rooms.size,
+    maxRooms: config.maxRooms,
+    maxPlayers: config.maxClientsPerRoom,
+  });
 }
 
 function publicState(room, selfId = null) {
@@ -358,6 +364,9 @@ function publicState(room, selfId = null) {
     selfId,
     roomCode: room.code,
     roomVisibility: room.visibility,
+    roomCount: rooms.size,
+    maxRooms: config.maxRooms,
+    maxPlayers: config.maxClientsPerRoom,
     controllerId: room.controllerId,
     phase: room.activeRound ? "round" : "lobby",
     settings: room.settings,
@@ -683,9 +692,21 @@ function joinRoom(client, room, requestedName) {
 }
 
 function joinRequestedRoom(client, message) {
+  const hasRequestedCode = String(message.roomCode ?? "").trim().length > 0;
+  const requestedCode = sanitizeRoomCode(message.roomCode);
+  const creatingRoom = !hasRequestedCode || !rooms.has(requestedCode);
   const room = getOrCreateRoom(message.roomCode, true, sanitizeRoomVisibility(message.visibility));
   if (!room) {
-    send(client, { type: "error", code: "room_unavailable", message: "Room unavailable." });
+    const maxRoomsReached = creatingRoom && rooms.size >= config.maxRooms;
+    send(client, {
+      type: "error",
+      code: maxRoomsReached ? "max_rooms" : "room_unavailable",
+      message: maxRoomsReached
+        ? `All ${config.maxRooms} rooms are live. Join an existing room.`
+        : "Room unavailable.",
+      maxRooms: config.maxRooms,
+      roomCount: rooms.size,
+    });
     return false;
   }
   if (!room.clients.size && message.visibility) room.visibility = sanitizeRoomVisibility(message.visibility);
@@ -732,6 +753,17 @@ function handleMessage(client, raw) {
   if (message.type === "listRooms") {
     if (!rateLimit(client, "lobby", 8)) return rejectMessage(client, "lobby_rate_limit");
     sendRoomList(client);
+    return;
+  }
+
+  if (message.type === "ping") {
+    if (!rateLimit(client, "ping", 4)) return rejectMessage(client, "ping_rate_limit");
+    send(client, {
+      type: "pong",
+      clientTime: Number(message.clientTime) || 0,
+      sequence: Math.max(0, Math.floor(Number(message.sequence) || 0)),
+      serverTime: nowMs(),
+    });
     return;
   }
 
@@ -796,7 +828,7 @@ function handleMessage(client, raw) {
   }
 
   if (message.type === "startRound") {
-    if (!rateLimit(client, "lobby", 4)) return rejectMessage(client, "lobby_rate_limit");
+    if (!rateLimit(client, "lobby", 8)) return rejectMessage(client, "lobby_rate_limit");
     startRound(room, client);
     return;
   }
