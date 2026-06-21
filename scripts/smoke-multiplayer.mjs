@@ -86,6 +86,8 @@ alice.ws.send(JSON.stringify({
 }));
 alice.ws.send(JSON.stringify({ type: "startRound" }));
 const started = await alice.waitFor((message) => message.type === "roundStarted" && message.roomCode === roomOne);
+const aliceSlotKey = started.round.slots.find((slot) => slot.sessionId === alice.sessionId)?.key;
+if (!aliceSlotKey) throw new Error("Alice round slot not found");
 
 for (let sequence = 1; sequence <= 4; sequence += 1) {
   alice.ws.send(JSON.stringify({
@@ -102,8 +104,15 @@ const snapshot = await alice.waitFor((message) => {
   return car && car.inputSequence >= 4;
 });
 alice.ws.close();
+const detachedState = await bob.waitFor((message) => (
+  message.type === "state" &&
+  message.roomCode === roomOne &&
+  message.phase === "round" &&
+  message.round?.slots?.some((slot) => slot.key === aliceSlotKey && slot.type === "player" && slot.clientId === null)
+));
 
 const reconnect = await connect({ name: "AliceAgain", roomCode: roomOne, sessionId: alice.sessionId });
+const reattachedSlot = reconnect.state.round?.slots?.find((slot) => slot.sessionId === alice.sessionId);
 const acknowledged = snapshot.cars.find((entry) => entry.sessionId === alice.sessionId).inputSequence;
 
 const duplicateOne = await connect({ name: "DuplicateOne", roomCode: `D${roomOne.slice(1)}` });
@@ -120,8 +129,17 @@ const duplicateStarted = await duplicateTwo.waitFor((message) => (
 ));
 const duplicateSlotKeys = duplicateStarted.round.slots.map((slot) => slot.key);
 const duplicateSlotKeysUnique = new Set(duplicateSlotKeys).size === duplicateSlotKeys.length;
+const disconnectedSlotStayedPlayer = detachedState.round.slots.find((slot) => slot.key === aliceSlotKey)?.type === "player";
+const disconnectedSlotDetached = detachedState.round.slots.find((slot) => slot.key === aliceSlotKey)?.clientId === null;
+const reconnectedSameSession = reconnect.sessionId === alice.sessionId;
+const reconnectedSameSlot = reattachedSlot?.key === aliceSlotKey && reattachedSlot.clientId === reconnect.state.selfId;
 const result = {
-  ok: duplicateState.clients.length === 1 && duplicateSlotKeysUnique,
+  ok: duplicateState.clients.length === 1 &&
+    duplicateSlotKeysUnique &&
+    disconnectedSlotStayedPlayer &&
+    disconnectedSlotDetached &&
+    reconnectedSameSession &&
+    reconnectedSameSlot,
   roomOne,
   roomTwo,
   roomOnePlayers: bob.state.clients.length,
@@ -129,7 +147,10 @@ const result = {
   roomOneSlots: started.round.slots.length,
   snapshotCars: snapshot.cars.length,
   acknowledged,
-  reconnectedSameSession: reconnect.sessionId === alice.sessionId,
+  disconnectedSlotStayedPlayer,
+  disconnectedSlotDetached,
+  reconnectedSameSession,
+  reconnectedSameSlot,
   duplicateSessionClients: duplicateState.clients.length,
   duplicateSlotKeysUnique,
 };

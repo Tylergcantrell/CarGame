@@ -23,6 +23,15 @@ const lastTouchCommandAt = {
   jump: -Infinity,
 };
 
+function isTypingTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable;
+}
+
 export function keyboardAxes() {
   const forward = keys.has("KeyW") || keys.has("ArrowUp");
   const reverse = keys.has("KeyS") || keys.has("ArrowDown");
@@ -83,6 +92,11 @@ function handleTouchCommand(event, command) {
 
 export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl }) {
   window.addEventListener("keydown", (event) => {
+    if (isTypingTarget(event.target)) {
+      keys.delete(event.code);
+      return;
+    }
+
     if (
       [
         "KeyW",

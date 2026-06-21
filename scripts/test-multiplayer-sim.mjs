@@ -5,6 +5,7 @@ import {
   mergeInput,
   tickSim,
 } from "../server/shared/cannon-multiplayer-sim.js";
+import { spawnHeight, wheelPositions } from "../server/shared/vehicle-config.js";
 
 function makeRound({ arena = "orange" } = {}) {
   return {
@@ -62,6 +63,15 @@ assert.equal(queued.sim.inputs.get("a").jumpQueued, true, "queued jump should me
 tickSim(queued, 1000 / 60);
 assert.equal(queued.sim.inputs.get("a").jumpQueued, false, "queued jump should clear after a sim step");
 
+const staleInput = makeRound();
+staleInput.sim = createSimState(staleInput, { now: 0, rng: () => 0 });
+staleInput.sim.inputs.set("a", { throttle: 1, steer: 0, boost: false });
+staleInput.sim.inputTimes.set("a", 0);
+tickSim(staleInput, 1000);
+const staleCar = staleInput.sim.cars.get("player:a");
+assert.equal(staleCar.input.throttle, 0, "stale player input should be zeroed");
+assert.equal(staleInput.sim.inputs.has("a"), false, "stale input should be removed from the sim");
+
 const bounded = makeRound({ arena: "green" });
 bounded.sim = createSimState(bounded, { now: 0, rng: () => 0 });
 const boundedCar = bounded.sim.cars.get("player:a");
@@ -84,10 +94,54 @@ for (let i = 1; i <= 8; i += 1) tickSim(tagRound, i * 1000 / 60);
 assert.equal(target.isIt, true, "Cannon contact should transfer tag");
 assert.equal(tagger.isIt, false, "tagger should stop being it");
 
+const wheelTagRound = makeRound();
+wheelTagRound.sim = createSimState(wheelTagRound, { now: 0, rng: () => 0 });
+const wheelTagger = wheelTagRound.sim.cars.get("player:a");
+const wheelTarget = wheelTagRound.sim.cars.get("player:b");
+const frontLeftWheel = wheelPositions[0];
+wheelTagger.isIt = true;
+wheelTarget.isIt = false;
+wheelTarget.body.position.set(0, spawnHeight, 0);
+wheelTarget.body.velocity.set(0, 0, 0);
+wheelTarget.body.angularVelocity.set(0, 0, 0);
+wheelTagger.body.position.set(-frontLeftWheel.x, spawnHeight + 1.85 - frontLeftWheel.y, -frontLeftWheel.z);
+wheelTagger.body.velocity.set(0, 0, 0);
+wheelTagger.body.angularVelocity.set(0, 0, 0);
+tickSim(wheelTagRound, 1000 / 60);
+assert.equal(wheelTarget.isIt, true, "wheel overlap should transfer tag even without chassis contact");
+assert.equal(wheelTagger.isIt, false, "wheel tagger should stop being it");
+
+const sweptRound = makeRound();
+sweptRound.sim = createSimState(sweptRound, { now: 0, rng: () => 0 });
+const sweptTagger = sweptRound.sim.cars.get("player:a");
+const sweptTarget = sweptRound.sim.cars.get("player:b");
+sweptTagger.isIt = true;
+sweptTarget.isIt = false;
+sweptTagger.body.position.set(-8, spawnHeight, 0);
+sweptTagger.body.velocity.set(960, 0, 0);
+sweptTarget.body.position.set(0, spawnHeight, 0);
+sweptTarget.body.velocity.set(0, 0, 0);
+tickSim(sweptRound, 1000 / 60);
+assert.equal(sweptTarget.isIt, true, "swept tag volume overlap should transfer tag during high-speed crossing");
+assert.equal(sweptTagger.isIt, false, "swept tagger should stop being it");
+
+const sweptNearMissRound = makeRound();
+sweptNearMissRound.sim = createSimState(sweptNearMissRound, { now: 0, rng: () => 0 });
+const nearMissTagger = sweptNearMissRound.sim.cars.get("player:a");
+const nearMissTarget = sweptNearMissRound.sim.cars.get("player:b");
+nearMissTagger.isIt = true;
+nearMissTarget.isIt = false;
+nearMissTagger.body.position.set(-8, spawnHeight + 5, 0);
+nearMissTagger.body.velocity.set(960, 0, 0);
+nearMissTarget.body.position.set(0, spawnHeight, 0);
+nearMissTarget.body.velocity.set(0, 0, 0);
+tickSim(sweptNearMissRound, 1000 / 60);
+assert.equal(nearMissTagger.isIt, true, "swept tag should not fire on a near miss without volume overlap");
+assert.equal(nearMissTarget.isIt, false, "near-miss target should not become it");
+
 const disconnectedRound = makeRound();
 disconnectedRound.sim = createSimState(disconnectedRound, { now: 0, rng: () => 0 });
 const disconnectedSlot = disconnectedRound.slots.find((slot) => slot.sessionId === "a");
-disconnectedSlot.type = "ai";
 disconnectedSlot.clientId = null;
 disconnectedRound.sim.inputs.delete("a");
 const disconnectedCar = disconnectedRound.sim.cars.get("player:a");
@@ -98,7 +152,10 @@ disconnectedCar.body.position.copy(activeCar.body.position);
 disconnectedCar.body.position.x += 0.8;
 disconnectedCar.body.position.z += 0.8;
 for (let i = 1; i <= 8; i += 1) tickSim(disconnectedRound, i * 1000 / 60);
-assert.equal(disconnectedCar.isIt, true, "AI-controlled disconnected slot should remain collidable");
+assert.equal(disconnectedSlot.type, "player", "disconnected player slot should not become AI");
+assert.equal(disconnectedCar.input.throttle, 0, "disconnected player should run with no throttle input");
+assert.equal(disconnectedCar.input.steer, 0, "disconnected player should run with no steer input");
+assert.equal(disconnectedCar.isIt, true, "disconnected player slot should remain collidable");
 assert.equal(activeCar.isIt, false, "tagger should transfer tag to disconnected slot car");
 
 console.log(JSON.stringify({ ok: true, distance: Number(distance.toFixed(3)) }, null, 2));

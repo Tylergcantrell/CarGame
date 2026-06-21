@@ -84,6 +84,15 @@ const localPredictionDeadZoneSq = 0.0025;
 const localPredictionSnapDistanceSq = 324;
 const localPredictionCorrection = 0.18;
 const localPredictionFastCorrection = 0.38;
+const wheelTagSkin = 0.12;
+const wheelTagBounds = {
+  minX: -1.42,
+  maxX: 1.42,
+  minY: -0.45,
+  maxY: 1.15,
+  minZ: -1.95,
+  maxZ: 2.15,
+};
 const carBodyVisualMatrix = new THREE.Matrix4();
 const wheelMatrix = new THREE.Matrix4();
 const wheelVisualPosition = new THREE.Vector3();
@@ -120,6 +129,7 @@ const arenaRayBounds = {
 };
 const savedChassisPosition = new CANNON.Vec3();
 const savedChassisQuaternion = new CANNON.Quaternion();
+const wheelTagLocalPoint = new CANNON.Vec3();
 const cameraToCandidate = new THREE.Vector3();
 const cameraSafeOffset = new THREE.Vector3();
 const cameraRawForward = new THREE.Vector3();
@@ -2976,6 +2986,59 @@ function onCarBodyCollide(car, otherBody) {
   resolveCarTagPair(car, otherBody?.userData?.car);
 }
 
+function updateWheelTagTransforms(car) {
+  for (const wheel of car.vehicle.wheelInfos) {
+    car.vehicle.updateWheelTransformWorld(wheel);
+  }
+}
+
+function wheelCenterTouchesCar(wheel, car) {
+  car.body.pointToLocalFrame(wheel.worldTransform.position, wheelTagLocalPoint);
+  const radius = (wheel.radius ?? wheelOptions.radius) + wheelTagSkin;
+  return wheelTagLocalPoint.x >= wheelTagBounds.minX - radius &&
+    wheelTagLocalPoint.x <= wheelTagBounds.maxX + radius &&
+    wheelTagLocalPoint.y >= wheelTagBounds.minY - radius &&
+    wheelTagLocalPoint.y <= wheelTagBounds.maxY + radius &&
+    wheelTagLocalPoint.z >= wheelTagBounds.minZ - radius &&
+    wheelTagLocalPoint.z <= wheelTagBounds.maxZ + radius;
+}
+
+function wheelCentersTouch(wheelA, wheelB) {
+  const positionA = wheelA.worldTransform.position;
+  const positionB = wheelB.worldTransform.position;
+  const radius = (wheelA.radius ?? wheelOptions.radius) + (wheelB.radius ?? wheelOptions.radius) + wheelTagSkin;
+  const dx = positionA.x - positionB.x;
+  const dy = positionA.y - positionB.y;
+  const dz = positionA.z - positionB.z;
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
+}
+
+function processWheelTagContacts() {
+  if (gameState.phase !== "playing" || gameState.tagCooldown > 0 || isMultiplayerRoundActive()) return false;
+  for (const car of gameState.cars) updateWheelTagTransforms(car);
+
+  for (let i = 0; i < gameState.cars.length - 1; i += 1) {
+    for (let j = i + 1; j < gameState.cars.length; j += 1) {
+      const carA = gameState.cars[i];
+      const carB = gameState.cars[j];
+      if (!carA.isIt && !carB.isIt) continue;
+
+      for (const wheel of carA.vehicle.wheelInfos) {
+        if (wheelCenterTouchesCar(wheel, carB)) return resolveCarTagPair(carA, carB);
+      }
+      for (const wheel of carB.vehicle.wheelInfos) {
+        if (wheelCenterTouchesCar(wheel, carA)) return resolveCarTagPair(carA, carB);
+      }
+      for (const wheelA of carA.vehicle.wheelInfos) {
+        for (const wheelB of carB.vehicle.wheelInfos) {
+          if (wheelCentersTouch(wheelA, wheelB)) return resolveCarTagPair(carA, carB);
+        }
+      }
+    }
+  }
+  return false;
+}
+
 function clearCarSurfaceContacts() {
   for (const car of gameState.cars) {
     car.surfaceContactNormal.set(0, 0, 0);
@@ -3023,6 +3086,7 @@ function processPhysicsContacts() {
 
     resolveCarTagPair(carA, carB);
   }
+  processWheelTagContacts();
   finalizeCarSurfaceContacts();
 }
 
@@ -4813,6 +4877,58 @@ function updateLeaderboard() {
   }
 }
 
+function rankedRoundResults(cars) {
+  const sorted = cars
+    .map((car, index) => ({
+      car,
+      index,
+      scoreMs: Math.round(car.score * 1000),
+    }))
+    .sort((a, b) => (b.scoreMs - a.scoreMs) || (a.index - b.index));
+
+  let previousScoreMs = null;
+  let previousRank = 0;
+  return sorted.map((entry, index) => {
+    const rank = entry.scoreMs === previousScoreMs ? previousRank : index + 1;
+    previousScoreMs = entry.scoreMs;
+    previousRank = rank;
+    return {
+      car: entry.car,
+      rank,
+      score: Math.floor(entry.scoreMs / 1000),
+    };
+  });
+}
+
+function renderResultRows(results) {
+  resultsListEl.innerHTML = "";
+  for (const result of results) {
+    const car = result.car ?? null;
+    const color = car?.color ?? getColorByName(result.color);
+    const isPlayer = car?.isPlayer ??
+      (result.sessionId === multiplayerState.sessionId || result.clientId === multiplayerState.selfId);
+    const score = Number.isFinite(result.score)
+      ? result.score
+      : Math.floor((Number(result.scoreMs) || 0) / 1000);
+    const item = document.createElement("li");
+    item.className = `result-row${result.rank === 1 ? " winner" : ""}${isPlayer ? " player" : ""}`;
+    item.style.setProperty("--car-color", color.css);
+    item.innerHTML = `
+      <span class="result-rank">${result.rank}</span>
+      <span class="result-chip"></span>
+      <span class="result-name">
+        <strong>${car?.color?.name ?? result.name ?? color.name}</strong>
+        ${isPlayer ? '<em>You</em>' : ""}
+      </span>
+      <span class="result-score">
+        <strong>${score}</strong>
+        <small>sec</small>
+      </span>
+    `;
+    resultsListEl.append(item);
+  }
+}
+
 function startRound(options = {}) {
   if (options instanceof Event) options = {};
   closePauseMenu({ restoreSolo: false });
@@ -4916,27 +5032,7 @@ function endRound(options = {}) {
   setUiPhase("ended");
   countdownEl.classList.add("hidden");
   for (const car of gameState.cars) clearVehicleInputs(car);
-  const sorted = [...gameState.cars].sort((a, b) => b.score - a.score);
-  resultsListEl.innerHTML = "";
-  sorted.forEach((car, index) => {
-    const item = document.createElement("li");
-    item.className = `result-row${index === 0 ? " winner" : ""}${car.isPlayer ? " player" : ""}`;
-    item.style.setProperty("--car-color", car.color.css);
-    const score = Math.floor(car.score);
-    item.innerHTML = `
-      <span class="result-rank">${index + 1}</span>
-      <span class="result-chip"></span>
-      <span class="result-name">
-        <strong>${car.color.name}</strong>
-        ${car.isPlayer ? '<em>You</em>' : ""}
-      </span>
-      <span class="result-score">
-        <strong>${score}</strong>
-        <small>sec</small>
-      </span>
-    `;
-    resultsListEl.append(item);
-  });
+  renderResultRows(options.results ?? rankedRoundResults(gameState.cars));
   playAgainButton.classList.toggle("hidden", multiplayerEnabled());
   endScreenEl.classList.remove("hidden");
   if (options.autoReturnToLobby) showMultiplayerScoreboardThenLobby();

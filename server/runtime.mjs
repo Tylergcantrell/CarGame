@@ -300,7 +300,9 @@ function assignController(room) {
 
 function roundPlayerSessions(room) {
   if (!room.activeRound) return new Set();
-  return new Set(room.activeRound.slots.filter((slot) => slot.type === "player").map((slot) => slot.sessionId));
+  return new Set(room.activeRound.slots
+    .filter((slot) => slot.type === "player" && slot.clientId)
+    .map((slot) => slot.sessionId));
 }
 
 function publicSlot(slot, selfSessionId = null) {
@@ -409,13 +411,6 @@ function broadcastState(room) {
   broadcast(room, (selfId) => publicState(room, selfId));
 }
 
-function roundCarsForSlots(round) {
-  if (!round?.sim) return [];
-  return round.slots
-    .map((slot) => ({ slot, car: round.sim.cars.get(slot.key) }))
-    .filter((entry) => entry.car);
-}
-
 function publicSnapshotForClient(snapshot, client) {
   if (!snapshot || !client) return snapshot;
   return {
@@ -427,57 +422,75 @@ function publicSnapshotForClient(snapshot, client) {
   };
 }
 
+function rankRoundResults(round, snapshot, room) {
+  const carsByKey = new Map((snapshot?.cars ?? []).map((car) => [car.key, car]));
+  const entries = round.slots.map((slot, index) => {
+    const car = carsByKey.get(slot.key);
+    return {
+      key: slot.key,
+      type: slot.type,
+      id: slot.id ?? null,
+      publicId: slot.publicId ?? null,
+      clientId: slot.clientId ?? null,
+      sessionId: slot.sessionId ?? null,
+      name: slot.name ?? slot.color ?? slot.key,
+      color: slot.color,
+      connected: Boolean(slot.clientId && room.clients.has(slot.clientId)),
+      scoreMs: Math.round((car?.score ?? 0) * 1000),
+      slotIndex: index,
+    };
+  }).sort((a, b) => (b.scoreMs - a.scoreMs) || (a.slotIndex - b.slotIndex));
+
+  let previousScoreMs = null;
+  let previousRank = 0;
+  let tieGroup = 0;
+  return entries.map((entry, index) => {
+    const tied = entry.scoreMs === previousScoreMs;
+    if (!tied) tieGroup += 1;
+    const rank = tied ? previousRank : index + 1;
+    previousScoreMs = entry.scoreMs;
+    previousRank = rank;
+    return {
+      key: entry.key,
+      type: entry.type,
+      id: entry.id,
+      publicId: entry.publicId,
+      clientId: entry.clientId,
+      sessionId: entry.sessionId,
+      name: entry.name,
+      color: entry.color,
+      connected: entry.connected,
+      scoreMs: entry.scoreMs,
+      rank,
+      tieGroup,
+    };
+  });
+}
+
+function publicResultsForClient(results, client) {
+  return results.map((result) => ({
+    ...result,
+    sessionId: result.sessionId && result.sessionId === client.sessionId ? result.sessionId : null,
+  }));
+}
+
 function broadcastSnapshot(room, snapshot) {
   for (const client of room.clients.values()) {
     send(client, publicSnapshotForClient(snapshot, client));
   }
 }
 
-function reassignItFromSlot(room, departingSlot) {
-  const round = room.activeRound;
-  const departingCar = departingSlot ? round?.sim?.cars.get(departingSlot.key) : null;
-  if (!round?.sim || !departingCar?.isIt) return false;
-
-  const activeSessions = new Set([...room.clients.values()].map((client) => client.sessionId));
-  const entries = roundCarsForSlots(round).filter((entry) => entry.slot.key !== departingSlot.key);
-  const replacement =
-    entries.find((entry) => entry.slot.type === "player" && activeSessions.has(entry.slot.sessionId))?.car ??
-    entries[0]?.car ??
-    null;
-
-  departingCar.isIt = false;
-  departingCar.immunityRemaining = 0;
-  if (!replacement) return true;
-  replacement.isIt = true;
-  replacement.immunityRemaining = 0;
-  return true;
-}
-
-function ensureRoundHasIt(room) {
-  const entries = roundCarsForSlots(room.activeRound);
-  if (entries.length === 0 || entries.some((entry) => entry.car.isIt)) return false;
-
-  const activeSessions = new Set([...room.clients.values()].map((client) => client.sessionId));
-  const replacement =
-    entries.find((entry) => entry.slot.type === "player" && activeSessions.has(entry.slot.sessionId))?.car ??
-    entries[0].car;
-  replacement.isIt = true;
-  replacement.immunityRemaining = 0;
-  return true;
-}
-
-function convertRoundSlotToAi(room, slot, { keepSession = true } = {}) {
+function detachRoundPlayerSlot(room, slot) {
   if (!room.activeRound || !slot) return false;
-  const changedIt = reassignItFromSlot(room, slot);
-  const previousSessionId = slot.sessionId;
-
-  slot.type = "ai";
+  const previousClientId = slot.clientId;
   slot.clientId = null;
-  slot.id ??= `ai:${slot.key}`;
-  if (!keepSession) slot.sessionId = null;
-  if (previousSessionId) room.activeRound.sim?.inputs.delete(previousSessionId);
+  if (slot.sessionId) {
+    room.activeRound.sim?.inputs.delete(slot.sessionId);
+    room.activeRound.sim?.inputSequences.delete(slot.sessionId);
+    room.activeRound.sim?.inputTimes.delete(slot.sessionId);
+  }
 
-  return changedIt || ensureRoundHasIt(room);
+  return Boolean(previousClientId);
 }
 
 function buildRoundSlots(room, roundSettings) {
@@ -550,6 +563,7 @@ function endRound(room, reason = "timer") {
   room.simTimer = null;
   const endedRound = room.activeRound;
   const finalSnapshot = makeSimSnapshot(room.code, endedRound, nowMs());
+  const finalResults = rankRoundResults(endedRound, finalSnapshot, room);
   room.activeRound = null;
   room.settings = normalizeSettings(room, room.settings);
   metrics.roundsEnded += 1;
@@ -561,6 +575,7 @@ function endRound(room, reason = "timer") {
       roundId: endedRound.id,
       reason,
       snapshot: publicSnapshotForClient(finalSnapshot, client),
+      results: publicResultsForClient(finalResults, client),
     };
   });
   broadcastState(room);
@@ -614,7 +629,7 @@ function rejectMessage(client, reason = "unknown") {
   client.droppedMessages += 1;
 }
 
-function leaveRoom(client, { removeRoundSlot = true } = {}) {
+function leaveRoom(client) {
   const room = client.room;
   if (!room) return;
   room.clients.delete(client.id);
@@ -629,10 +644,7 @@ function leaveRoom(client, { removeRoundSlot = true } = {}) {
   room.settings = normalizeSettings(room, room.settings);
   if (room.activeRound) {
     const slot = room.activeRound.slots.find((entry) => entry.sessionId === client.sessionId);
-    if (slot) convertRoundSlotToAi(room, slot, { keepSession: !removeRoundSlot });
-    if (!room.activeRound.slots.some((entry) => entry.type === "player" && entry.clientId)) {
-      endRound(room, "empty");
-    }
+    if (slot) detachRoundPlayerSlot(room, slot);
   }
   client.room = null;
   if (!destroyRoomIfEmpty(room)) broadcastState(room);
@@ -642,7 +654,7 @@ function joinRoom(client, room, requestedName) {
   if (client.room && client.room !== room) leaveRoom(client);
   for (const existing of clients.values()) {
     if (existing.id === client.id || existing.sessionId !== client.sessionId || existing.room === room) continue;
-    leaveRoom(existing, { removeRoundSlot: false });
+    leaveRoom(existing);
     existing.ws.close(4001, "Session continued in another connection.");
   }
   const existingSessionClient = [...room.clients.values()]
@@ -653,7 +665,7 @@ function joinRoom(client, room, requestedName) {
     return false;
   }
   if (existingSessionClient) {
-    leaveRoom(existingSessionClient, { removeRoundSlot: false });
+    leaveRoom(existingSessionClient);
     existingSessionClient.ws.close(4001, "Session continued in another connection.");
   }
 
@@ -836,7 +848,11 @@ function handleMessage(client, raw) {
   if (message.type === "input") {
     if (!rateLimit(client, "inputs", 75)) return rejectMessage(client, "input_rate_limit");
     const round = room.activeRound;
-    if (!round?.sim || !round.slots.some((slot) => slot.sessionId === client.sessionId)) {
+    if (!round?.sim || !round.slots.some((slot) => (
+      slot.type === "player" &&
+      slot.sessionId === client.sessionId &&
+      slot.clientId === client.id
+    ))) {
       metrics.ignoredInputs += 1;
       return;
     }
@@ -852,18 +868,15 @@ function handleMessage(client, raw) {
     metrics.inputs += 1;
     round.sim.inputs.set(client.sessionId, mergeInput(round.sim.inputs.get(client.sessionId), message.input));
     round.sim.inputSequences.set(client.sessionId, sequence);
+    round.sim.inputTimes.set(client.sessionId, nowMs());
     return;
   }
 
   if (message.type === "leaveRound") {
     if (!room.activeRound) return;
     const slot = room.activeRound.slots.find((entry) => entry.sessionId === client.sessionId);
-    if (slot) convertRoundSlotToAi(room, slot, { keepSession: false });
-    if (!room.activeRound.slots.some((slot) => slot.type === "player" && slot.clientId)) {
-      endRound(room, "empty");
-    } else {
-      broadcastState(room);
-    }
+    if (slot) detachRoundPlayerSlot(room, slot);
+    broadcastState(room);
     return;
   }
 
@@ -894,7 +907,7 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     metrics.closedConnections += 1;
     clients.delete(client.id);
-    leaveRoom(client, { removeRoundSlot: false });
+    leaveRoom(client);
   });
 });
 

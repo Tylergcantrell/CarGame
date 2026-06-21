@@ -26,8 +26,21 @@ const arenaWallColliderThickness = 4.5;
 const chassisBodyLift = 0.26;
 const sideSkidAngle = 0.52;
 const minWheelSupportDot = -0.34;
+const wheelTagSkin = 0.12;
+const wheelTagBounds = {
+  minX: -1.42,
+  maxX: 1.42,
+  minY: -0.45,
+  maxY: 1.15,
+  minZ: -1.95,
+  maxZ: 2.15,
+};
+const inputFreshnessTimeoutMs = 450;
+const sweptTagSampleDistance = 0.6;
+const maxSweptTagSamples = 8;
 const boostForce = new CANNON.Vec3();
 const boostPoint = new CANNON.Vec3(0, 0, 1.2);
+const wheelTagLocalPoint = new CANNON.Vec3();
 const upAxis = new THREE.Vector3(0, 1, 0);
 const airControlTorque = new CANNON.Vec3();
 const worldAirControlTorque = new CANNON.Vec3();
@@ -38,6 +51,12 @@ const arenaWallPoint = new THREE.Vector3();
 const contactSurfaceNormal = new THREE.Vector3();
 const rightingClearanceOffset = new THREE.Vector3();
 const rightingSampleWorld = new THREE.Vector3();
+const sweptPositionA = new THREE.Vector3();
+const sweptPositionB = new THREE.Vector3();
+const sweptQuaternionA = new THREE.Quaternion();
+const sweptQuaternionB = new THREE.Quaternion();
+const sweptWorldPoint = new THREE.Vector3();
+const sweptLocalPoint = new THREE.Vector3();
 const tmpVec3A = new THREE.Vector3();
 const tmpVec3B = new THREE.Vector3();
 const tmpVec3C = new THREE.Vector3();
@@ -57,6 +76,17 @@ const rightingClearanceSamplePoints = [
   new THREE.Vector3(1.22, 0.28, -1.36),
   new THREE.Vector3(0, 0.94, -0.28),
   new THREE.Vector3(0, 0.36, 2.12),
+];
+
+const tagBoundsCorners = [
+  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.minY, wheelTagBounds.minZ),
+  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.minY, wheelTagBounds.maxZ),
+  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.maxY, wheelTagBounds.minZ),
+  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.maxY, wheelTagBounds.maxZ),
+  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.minY, wheelTagBounds.minZ),
+  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.minY, wheelTagBounds.maxZ),
+  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.maxY, wheelTagBounds.minZ),
+  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.maxY, wheelTagBounds.maxZ),
 ];
 
 function hashString(value) {
@@ -944,6 +974,160 @@ function finalizeCarSurfaceContacts(cars) {
   }
 }
 
+function resolveTagPair(sim, carA, carB) {
+  if (!carA || !carB || carA === carB || sim.tagCooldown > 0) return false;
+  const itCar = carA.isIt ? carA : carB.isIt ? carB : null;
+  const other = itCar === carA ? carB : itCar === carB ? carA : null;
+  if (!itCar || !other || other.immunityRemaining > 0) return false;
+  itCar.isIt = false;
+  itCar.immunityRemaining = vehicleTuning.tagImmunityDuration;
+  other.isIt = true;
+  other.immunityRemaining = 0;
+  sim.tagCooldown = 0.28;
+  return true;
+}
+
+function updateWheelTagTransforms(car) {
+  for (const wheel of car.vehicle.wheelInfos) {
+    car.vehicle.updateWheelTransformWorld(wheel);
+  }
+}
+
+function wheelCenterTouchesCar(wheel, car) {
+  car.body.pointToLocalFrame(wheel.worldTransform.position, wheelTagLocalPoint);
+  const radius = (wheel.radius ?? wheelOptions.radius) + wheelTagSkin;
+  return wheelTagLocalPoint.x >= wheelTagBounds.minX - radius &&
+    wheelTagLocalPoint.x <= wheelTagBounds.maxX + radius &&
+    wheelTagLocalPoint.y >= wheelTagBounds.minY - radius &&
+    wheelTagLocalPoint.y <= wheelTagBounds.maxY + radius &&
+    wheelTagLocalPoint.z >= wheelTagBounds.minZ - radius &&
+    wheelTagLocalPoint.z <= wheelTagBounds.maxZ + radius;
+}
+
+function wheelCentersTouch(wheelA, wheelB) {
+  const positionA = wheelA.worldTransform.position;
+  const positionB = wheelB.worldTransform.position;
+  const radius = (wheelA.radius ?? wheelOptions.radius) + (wheelB.radius ?? wheelOptions.radius) + wheelTagSkin;
+  const dx = positionA.x - positionB.x;
+  const dy = positionA.y - positionB.y;
+  const dz = positionA.z - positionB.z;
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
+}
+
+function playerInputIsFresh(sim, sessionId) {
+  if (!sessionId || !sim.inputTimes.has(sessionId)) return true;
+  return sim.lastTick - sim.inputTimes.get(sessionId) <= inputFreshnessTimeoutMs;
+}
+
+function bodyMotionDistance(body) {
+  const dx = body.position.x - body.previousPosition.x;
+  const dy = body.position.y - body.previousPosition.y;
+  const dz = body.position.z - body.previousPosition.z;
+  return Math.hypot(dx, dy, dz);
+}
+
+function processWheelTagContacts(sim, cars) {
+  if (sim.tagCooldown > 0) return false;
+  for (const car of cars) updateWheelTagTransforms(car);
+
+  for (let i = 0; i < cars.length - 1; i += 1) {
+    for (let j = i + 1; j < cars.length; j += 1) {
+      const carA = cars[i];
+      const carB = cars[j];
+      if (!carA.isIt && !carB.isIt) continue;
+
+      for (const wheel of carA.vehicle.wheelInfos) {
+        if (wheelCenterTouchesCar(wheel, carB)) return resolveTagPair(sim, carA, carB);
+      }
+      for (const wheel of carB.vehicle.wheelInfos) {
+        if (wheelCenterTouchesCar(wheel, carA)) return resolveTagPair(sim, carA, carB);
+      }
+      for (const wheelA of carA.vehicle.wheelInfos) {
+        for (const wheelB of carB.vehicle.wheelInfos) {
+          if (wheelCentersTouch(wheelA, wheelB)) return resolveTagPair(sim, carA, carB);
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function setSweptTransform(car, alpha, position, quaternion) {
+  position.set(
+    car.body.previousPosition.x + (car.body.position.x - car.body.previousPosition.x) * alpha,
+    car.body.previousPosition.y + (car.body.position.y - car.body.previousPosition.y) * alpha,
+    car.body.previousPosition.z + (car.body.position.z - car.body.previousPosition.z) * alpha,
+  );
+  quaternion
+    .set(
+      car.body.previousQuaternion.x,
+      car.body.previousQuaternion.y,
+      car.body.previousQuaternion.z,
+      car.body.previousQuaternion.w,
+    )
+    .slerp(
+      tmpQuat.set(
+        car.body.quaternion.x,
+        car.body.quaternion.y,
+        car.body.quaternion.z,
+        car.body.quaternion.w,
+      ),
+      alpha,
+    );
+}
+
+function tagBoundsContainsLocal(point) {
+  return point.x >= wheelTagBounds.minX &&
+    point.x <= wheelTagBounds.maxX &&
+    point.y >= wheelTagBounds.minY &&
+    point.y <= wheelTagBounds.maxY &&
+    point.z >= wheelTagBounds.minZ &&
+    point.z <= wheelTagBounds.maxZ;
+}
+
+function localPointToSweptWorld(localPoint, position, quaternion, out) {
+  return out.copy(localPoint).applyQuaternion(quaternion).add(position);
+}
+
+function sweptWorldPointToLocal(worldPoint, position, quaternion, out) {
+  return out.copy(worldPoint).sub(position).applyQuaternion(tmpQuatB.copy(quaternion).conjugate());
+}
+
+function tagBoundsOverlapAtAlpha(carA, carB, alpha) {
+  setSweptTransform(carA, alpha, sweptPositionA, sweptQuaternionA);
+  setSweptTransform(carB, alpha, sweptPositionB, sweptQuaternionB);
+
+  for (const corner of tagBoundsCorners) {
+    localPointToSweptWorld(corner, sweptPositionA, sweptQuaternionA, sweptWorldPoint);
+    sweptWorldPointToLocal(sweptWorldPoint, sweptPositionB, sweptQuaternionB, sweptLocalPoint);
+    if (tagBoundsContainsLocal(sweptLocalPoint)) return true;
+
+    localPointToSweptWorld(corner, sweptPositionB, sweptQuaternionB, sweptWorldPoint);
+    sweptWorldPointToLocal(sweptWorldPoint, sweptPositionA, sweptQuaternionA, sweptLocalPoint);
+    if (tagBoundsContainsLocal(sweptLocalPoint)) return true;
+  }
+  return false;
+}
+
+function processSweptTagContacts(sim, cars) {
+  if (sim.tagCooldown > 0) return false;
+  for (let i = 0; i < cars.length - 1; i += 1) {
+    for (let j = i + 1; j < cars.length; j += 1) {
+      const carA = cars[i];
+      const carB = cars[j];
+      if (!carA.isIt && !carB.isIt) continue;
+      const motionA = bodyMotionDistance(carA.body);
+      const motionB = bodyMotionDistance(carB.body);
+      const samples = Math.min(maxSweptTagSamples, Math.floor(Math.max(motionA, motionB) / sweptTagSampleDistance));
+      for (let sample = 1; sample <= samples; sample += 1) {
+        const alpha = sample / (samples + 1);
+        if (tagBoundsOverlapAtAlpha(carA, carB, alpha)) return resolveTagPair(sim, carA, carB);
+      }
+    }
+  }
+  return false;
+}
+
 function processContacts(round, cars) {
   const sim = round.sim;
   sim.tagCooldown = Math.max(0, sim.tagCooldown - fixedStep);
@@ -961,18 +1145,13 @@ function processContacts(round, cars) {
       addCarSurfaceContact(carB, contact, false);
       continue;
     }
-    if (!carA || !carB || carA === carB || sim.tagCooldown > 0) continue;
-    const itCar = carA.isIt ? carA : carB.isIt ? carB : null;
-    const other = itCar === carA ? carB : itCar === carB ? carA : null;
-    if (!itCar || !other || other.immunityRemaining > 0) continue;
-    itCar.isIt = false;
-    itCar.immunityRemaining = vehicleTuning.tagImmunityDuration;
-    other.isIt = true;
-    other.immunityRemaining = 0;
-    sim.tagCooldown = 0.28;
-    changed = true;
-    break;
+    if (resolveTagPair(sim, carA, carB)) {
+      changed = true;
+      break;
+    }
   }
+  if (!changed) changed = processWheelTagContacts(sim, cars);
+  if (!changed) changed = processSweptTagContacts(sim, cars);
   finalizeCarSurfaceContacts(cars);
   return changed;
 }
@@ -984,7 +1163,9 @@ function stepRound(round) {
   const aiGameState = { phase: "playing", cars, itCar };
   for (const car of cars) {
     if (car.slot.type === "player") {
-      const storedInput = sim.inputs.get(car.slot.sessionId);
+      const storedInput = playerInputIsFresh(sim, car.slot.sessionId)
+        ? sim.inputs.get(car.slot.sessionId)
+        : undefined;
       const input = clampInput(storedInput);
       car.input.throttle = input.throttle;
       car.input.steer = input.steer;
@@ -994,6 +1175,8 @@ function stepRound(round) {
       if (storedInput) {
         storedInput.boostQueued = false;
         storedInput.jumpQueued = false;
+      } else if (car.slot.sessionId && sim.inputs.has(car.slot.sessionId)) {
+        sim.inputs.delete(car.slot.sessionId);
       }
     } else {
       updateAiCar(car, fixedStep, {
@@ -1046,6 +1229,7 @@ export function createSimState(round, { now = Date.now(), rng = null } = {}) {
     cars,
     inputs: new Map(),
     inputSequences: new Map(),
+    inputTimes: new Map(),
     rng: simRng,
     lastTick: now,
     lastSnapshot: 0,
