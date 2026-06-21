@@ -1,0 +1,43 @@
+name: Deploy CarTag Multiplayer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "server/**"
+      - "src/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "Dockerfile"
+      - ".github/workflows/deploy-lightsail.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: cartag-lightsail-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      LIGHTSAIL_HOST: 3.12.211.2
+      LIGHTSAIL_USER: deploy
+      DEPLOY_COMMAND: /usr/local/bin/cartag-deploy
+    steps:
+      - name: Configure SSH
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.LIGHTSAIL_SSH_KEY }}" > ~/.ssh/cartag_lightsail
+          chmod 600 ~/.ssh/cartag_lightsail
+          ssh-keyscan -H "$LIGHTSAIL_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy on Lightsail
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/cartag_lightsail \
+            -o IdentitiesOnly=yes \
+            "$LIGHTSAIL_USER@$LIGHTSAIL_HOST" \
+            "$DEPLOY_COMMAND"

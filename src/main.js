@@ -2468,10 +2468,8 @@ const multiplayerTitleEl = document.querySelector("#multiplayer-title");
 const multiplayerSubtitleEl = document.querySelector("#multiplayer-subtitle");
 const connectionPillEl = document.querySelector("#connection-pill");
 const multiplayerNameInput = document.querySelector("#multiplayer-name");
-const serverUrlInput = document.querySelector("#server-url");
 const roomCodeInput = document.querySelector("#room-code");
 const nameFieldEl = document.querySelector("#name-field");
-const serverFieldEl = document.querySelector("#server-field");
 const roomCodeFieldEl = document.querySelector("#room-code-field");
 const connectServerButton = document.querySelector("#connect-server");
 const roomVisibilitySelect = document.querySelector("#room-visibility");
@@ -2531,7 +2529,6 @@ const defaultServerUrl = configuredServerUrl ||
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname || "127.0.0.1"}:8787`;
 const storedPlayerName = localStorage.getItem("carTagPlayerName") ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
 multiplayerNameInput.value = storedPlayerName;
-serverUrlInput.value = localStorage.getItem("carTagServerUrl") ?? defaultServerUrl;
 roomCodeInput.value = localStorage.getItem("carTagRoomCode") ?? "";
 roomVisibilitySelect.value = localStorage.getItem("carTagRoomVisibility") ?? "public";
 
@@ -3193,7 +3190,7 @@ function currentPlayerName() {
 }
 
 function currentServerUrl() {
-  return serverUrlInput.value.trim() || defaultServerUrl;
+  return defaultServerUrl;
 }
 
 function clearMultiplayerReconnectTimer() {
@@ -3226,7 +3223,6 @@ function requestRoomList({ force = false } = {}) {
 function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selectedRoomVisibility() } = {}) {
   const cleanRoomCode = String(roomCode ?? "").trim().toUpperCase();
   const roomVisibility = visibility === "private" ? "private" : "public";
-  localStorage.setItem("carTagServerUrl", currentServerUrl());
   localStorage.setItem("carTagPlayerName", currentPlayerName());
   localStorage.setItem("carTagRoomVisibility", roomVisibility);
   if (cleanRoomCode) localStorage.setItem("carTagRoomCode", cleanRoomCode);
@@ -3285,10 +3281,6 @@ function renderRoomBrowser() {
   roomBrowserEl.innerHTML = "";
   if (isInMultiplayerRoom()) return;
   if (!multiplayerState.connected) {
-    const empty = document.createElement("div");
-    empty.className = "room-empty";
-    empty.textContent = "Connecting to multiplayer...";
-    roomBrowserEl.append(empty);
     return;
   }
 
@@ -3296,7 +3288,7 @@ function renderRoomBrowser() {
   if (!rooms.length) {
     const empty = document.createElement("div");
     empty.className = "room-empty";
-    empty.textContent = "No public rooms yet. Create one or join with a private code.";
+    empty.textContent = "No public rooms";
     roomBrowserEl.append(empty);
     return;
   }
@@ -3842,21 +3834,20 @@ function updateMultiplayerControls() {
     const stateLabel = !multiplayerState.connected
       ? "Connecting"
       : browsingRooms
-        ? "Browse Rooms"
+        ? "Matchmaking"
         : inRound
           ? selfInRound ? "Round Live" : "Waiting"
           : isRoomController() ? "Room Host" : "Room Lobby";
     connectionPillEl.textContent = stateLabel;
-    multiplayerTitleEl.textContent = browsingRooms ? "Online Rooms" : `Room ${multiplayerState.roomCode}`;
+    multiplayerTitleEl.textContent = browsingRooms ? "Online Play" : `Room ${multiplayerState.roomCode}`;
     multiplayerSubtitleEl.textContent = browsingRooms
-      ? "Join a public room, enter a private code, or create a new room."
+      ? "Public rooms and private codes"
       : inRound
-        ? selfInRound ? "You are in the current round." : "A round is already running. You will join the next one."
-        : isRoomController() ? "Set up the next round and start when everyone is ready." : "Choose your car color and wait for the host.";
+        ? selfInRound ? "Round live" : "Next round"
+        : isRoomController() ? "Host controls" : "Lobby";
   }
 
   nameFieldEl.classList.toggle("hidden", inRoom);
-  serverFieldEl.classList.toggle("hidden", multiplayerState.connected || inRoom);
   roomCodeFieldEl.classList.toggle("hidden", inRoom);
   connectServerButton.classList.toggle("hidden", !inRoom);
   connectServerButton.classList.toggle("connected", inRoom);
@@ -3885,7 +3876,7 @@ function updateMultiplayerControls() {
     startRoundButton.textContent = "Connecting...";
   } else if (!inRoom) {
     startRoundButton.disabled = true;
-    startRoundButton.textContent = "Join Or Create Room";
+    startRoundButton.textContent = "Join A Room";
   } else if (multiplayerState.phase !== "lobby") {
     startRoundButton.disabled = true;
     startRoundButton.textContent = "Round In Progress";
@@ -3904,7 +3895,7 @@ function renderMultiplayerLobby() {
   const controller = getControllerClient();
   requestRoomList();
   if (!multiplayerState.connected) {
-    lobbyStatusEl.textContent = "Connecting to multiplayer...";
+    lobbyStatusEl.textContent = "Connecting...";
     lobbyListEl.innerHTML = "";
     roomSummaryEl.innerHTML = "";
     renderRoomBrowser();
@@ -3912,7 +3903,7 @@ function renderMultiplayerLobby() {
     return;
   }
   if (!isInMultiplayerRoom()) {
-    lobbyStatusEl.textContent = "Public rooms appear automatically. Use a room code for private rooms.";
+    lobbyStatusEl.textContent = "Choose a room";
     lobbyListEl.innerHTML = "";
     roomSummaryEl.innerHTML = "";
     renderRoomBrowser();
@@ -3927,11 +3918,11 @@ function renderMultiplayerLobby() {
     );
     lobbyStatusEl.textContent = selfInRound
       ? `Round live - ${formatTime(secondsLeft)} left.`
-      : `Round in progress - you will join the next round in ${formatTime(secondsLeft)}.`;
+      : `Next round - ${formatTime(secondsLeft)}`;
   } else if (isRoomController()) {
-    lobbyStatusEl.textContent = "You are the host. Set round options and start when everyone is ready.";
+    lobbyStatusEl.textContent = "Host";
   } else {
-    lobbyStatusEl.textContent = `Waiting for ${controller?.name ?? "the host"} to start the round.`;
+    lobbyStatusEl.textContent = `Waiting for ${controller?.name ?? "host"}`;
   }
 
   renderRoomSummary();
@@ -4033,7 +4024,6 @@ function connectMultiplayer(options = {}) {
   const roomCode = lobbyOnly ? "" : (options.roomCode ?? roomCodeInput.value.trim().toUpperCase());
   const visibility = options.visibility ?? selectedRoomVisibility();
   multiplayerState.lastConnectionOptions = { lobbyOnly, roomCode, visibility };
-  localStorage.setItem("carTagServerUrl", url);
   localStorage.setItem("carTagPlayerName", name);
   localStorage.setItem("carTagRoomVisibility", visibility);
   if (roomCode) localStorage.setItem("carTagRoomCode", roomCode);
@@ -4098,7 +4088,7 @@ function connectMultiplayer(options = {}) {
       return;
     }
     if (message.type === "error") {
-      lobbyStatusEl.textContent = message.message ?? "Server error";
+      lobbyStatusEl.textContent = message.message ?? "Matchmaking error";
       if (message.code === "protocol_mismatch") {
         multiplayerState.manualDisconnect = true;
         socket.close();
@@ -4154,7 +4144,7 @@ function connectMultiplayer(options = {}) {
   });
 
   socket.addEventListener("error", () => {
-    lobbyStatusEl.textContent = "Server unavailable";
+    lobbyStatusEl.textContent = "Online unavailable";
   });
 }
 
@@ -5617,9 +5607,6 @@ multiplayerNameInput.addEventListener("change", () => {
   multiplayerNameInput.value = name;
   localStorage.setItem("carTagPlayerName", name);
   if (isInMultiplayerRoom()) sendServerMessage({ type: "setName", name });
-});
-serverUrlInput.addEventListener("change", () => {
-  localStorage.setItem("carTagServerUrl", serverUrlInput.value.trim() || defaultServerUrl);
 });
 roomCodeInput.addEventListener("input", () => {
   roomCodeInput.value = roomCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);

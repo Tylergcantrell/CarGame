@@ -215,9 +215,9 @@ body[data-phase="ended"] .jump-button {
 
 .multiplayer-panel {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 16px;
-  padding: 12px;
+  padding: 14px;
   border: 1px solid rgba(255, 138, 42, 0.22);
   border-radius: 6px;
   background:
@@ -281,7 +281,7 @@ body[data-phase="ended"] .jump-button {
 
 .connection-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.72fr) minmax(180px, 1.2fr) minmax(88px, 0.5fr) auto;
+  grid-template-columns: minmax(150px, 1fr) minmax(128px, 0.7fr) auto;
   gap: 8px;
   align-items: end;
 }
@@ -313,7 +313,7 @@ body[data-phase="ended"] .jump-button {
 
 .room-actions {
   display: grid;
-  grid-template-columns: minmax(120px, 0.8fr) repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(120px, 0.72fr) minmax(120px, 1fr) minmax(130px, 1fr) minmax(96px, 0.72fr);
   gap: 8px;
   align-items: end;
 }
@@ -355,6 +355,11 @@ body[data-phase="ended"] .jump-button {
   font-size: 12px;
   font-weight: 800;
   line-height: 1.35;
+}
+
+.danger-action {
+  border-color: rgba(255, 90, 70, 0.28);
+  color: #ffb19f;
 }
 
 .room-browser {
