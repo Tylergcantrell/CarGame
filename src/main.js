@@ -3735,7 +3735,7 @@ function makePredictedRound(round) {
 }
 
 function makeLocalSharedRound({ roundTime, arena, aiDifficulty, slots }) {
-  const now = roundClockNow(sharedRound);
+  const now = Date.now();
   const playStartsAt = now + gameState.countdownDuration * 1000;
   const sharedRound = {
     id: `local-${now}`,
