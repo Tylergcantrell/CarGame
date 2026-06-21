@@ -35,7 +35,7 @@ const wheelTagBounds = {
   minZ: -1.95,
   maxZ: 2.15,
 };
-const inputFreshnessTimeoutMs = 450;
+const inputFreshnessTimeoutMs = 1500;
 const sweptTagSampleDistance = 0.6;
 const maxSweptTagSamples = 8;
 const boostForce = new CANNON.Vec3();
@@ -545,16 +545,23 @@ function createCar(world, materials, slot, rng = Math.random) {
       unstickSteer: 1,
       lateralSign: rng() < 0.5 ? -1 : 1,
       lateralTimer: 1 + rng() * 2,
+      personalityKey: null,
       targetBiasTimer: 0,
       targetId: null,
       objective: new THREE.Vector3(),
       desired: new THREE.Vector3(),
       tacticalPoint: new THREE.Vector3(),
       lastPosition: new THREE.Vector3(),
+      lastObjectiveDistance: Infinity,
+      objectiveProgressTimer: 0,
       decisionTimer: rng() * 0.16,
       decisionInterval: 0.16 + rng() * 0.08,
       objectiveTimer: 0,
       jumpCooldown: 0,
+      mistakeTimer: 0,
+      mistakeSteer: 0,
+      feintTimer: 0,
+      feintSign: rng() < 0.5 ? -1 : 1,
     },
   };
   body.userData = { car };
@@ -996,12 +1003,13 @@ function updateWheelTagTransforms(car) {
 function wheelCenterTouchesCar(wheel, car) {
   car.body.pointToLocalFrame(wheel.worldTransform.position, wheelTagLocalPoint);
   const radius = (wheel.radius ?? wheelOptions.radius) + wheelTagSkin;
-  return wheelTagLocalPoint.x >= wheelTagBounds.minX - radius &&
-    wheelTagLocalPoint.x <= wheelTagBounds.maxX + radius &&
-    wheelTagLocalPoint.y >= wheelTagBounds.minY - radius &&
-    wheelTagLocalPoint.y <= wheelTagBounds.maxY + radius &&
-    wheelTagLocalPoint.z >= wheelTagBounds.minZ - radius &&
-    wheelTagLocalPoint.z <= wheelTagBounds.maxZ + radius;
+  const closestX = clamp(wheelTagLocalPoint.x, wheelTagBounds.minX, wheelTagBounds.maxX);
+  const closestY = clamp(wheelTagLocalPoint.y, wheelTagBounds.minY, wheelTagBounds.maxY);
+  const closestZ = clamp(wheelTagLocalPoint.z, wheelTagBounds.minZ, wheelTagBounds.maxZ);
+  const dx = wheelTagLocalPoint.x - closestX;
+  const dy = wheelTagLocalPoint.y - closestY;
+  const dz = wheelTagLocalPoint.z - closestZ;
+  return dx * dx + dy * dy + dz * dz <= radius * radius;
 }
 
 function wheelCentersTouch(wheelA, wheelB) {
@@ -1177,6 +1185,7 @@ function stepRound(round) {
         storedInput.jumpQueued = false;
       } else if (car.slot.sessionId && sim.inputs.has(car.slot.sessionId)) {
         sim.inputs.delete(car.slot.sessionId);
+        sim.inputTimes.delete(car.slot.sessionId);
       }
     } else {
       updateAiCar(car, fixedStep, {
@@ -1184,6 +1193,8 @@ function stepRound(round) {
         arenaContactForPoint,
         shouldRightWithJump,
         rng: sim.rng,
+        difficulty: round.settings.aiDifficulty,
+        arenaId: round.settings.arena,
       });
     }
     driveCar(car);
@@ -1232,6 +1243,7 @@ export function createSimState(round, { now = Date.now(), rng = null } = {}) {
     inputTimes: new Map(),
     rng: simRng,
     lastTick: now,
+    tick: 0,
     lastSnapshot: 0,
     accumulator: 0,
     tagCooldown: 0,
@@ -1249,6 +1261,7 @@ export function tickSim(round, now) {
   while (round.sim.accumulator >= fixedStep && steps < maxCatchupSteps) {
     steps += 1;
     tagChanged = stepRound(round) || tagChanged;
+    round.sim.tick += 1;
     round.sim.accumulator -= fixedStep;
   }
   return { tagChanged, steps };
@@ -1265,6 +1278,7 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
     roundId: round.id,
     serverTime: now,
     simLastTick: round.sim.lastTick,
+    simTick: round.sim.tick,
     simAccumulator: round.sim.accumulator,
     remainingMs,
     cars: round.slots.map((slot) => {
@@ -1286,6 +1300,32 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
         immunityRemaining: car.immunityRemaining,
         boostTimeRemaining: car.boostTimeRemaining,
         boostCooldownRemaining: car.boostCooldownRemaining,
+        manualRighting: car.manualRightingActive ? {
+          active: true,
+          elapsed: car.manualRightingElapsed,
+          startPosition: [
+            car.manualRightingStartPosition.x,
+            car.manualRightingStartPosition.y,
+            car.manualRightingStartPosition.z,
+          ],
+          targetPosition: [
+            car.manualRightingTargetPosition.x,
+            car.manualRightingTargetPosition.y,
+            car.manualRightingTargetPosition.z,
+          ],
+          startQuaternion: [
+            car.manualRightingStartQuaternion.x,
+            car.manualRightingStartQuaternion.y,
+            car.manualRightingStartQuaternion.z,
+            car.manualRightingStartQuaternion.w,
+          ],
+          targetQuaternion: [
+            car.manualRightingTargetQuaternion.x,
+            car.manualRightingTargetQuaternion.y,
+            car.manualRightingTargetQuaternion.z,
+            car.manualRightingTargetQuaternion.w,
+          ],
+        } : null,
         inputSequence: slot.sessionId ? (round.sim.inputSequences.get(slot.sessionId) ?? 0) : 0,
         input: clampInput(car.input),
       };

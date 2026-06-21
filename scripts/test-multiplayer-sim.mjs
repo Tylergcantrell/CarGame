@@ -35,6 +35,13 @@ function makeRound({ arena = "orange" } = {}) {
   };
 }
 
+function syncBodyHistory(car) {
+  car.body.previousPosition.copy(car.body.position);
+  car.body.interpolatedPosition.copy(car.body.position);
+  car.body.previousQuaternion.copy(car.body.quaternion);
+  car.body.interpolatedQuaternion.copy(car.body.quaternion);
+}
+
 const round = makeRound({ arena: "purple" });
 round.sim = createSimState(round, { now: 0, rng: () => 0 });
 round.sim.inputs.set("a", { throttle: 1, steer: 0, boost: false });
@@ -53,8 +60,25 @@ assert(distance > 1, "Cannon player should move after sustained throttle");
 assert.equal(movedPlayer.inputSequence, 7, "snapshot should acknowledge latest input sequence");
 assert(movedPlayer.position[1] > 0, "Cannon player should stay above world floor");
 assert.equal(typeof moved.simLastTick, "number", "snapshot should expose the server sim tick clock");
+assert.equal(typeof moved.simTick, "number", "snapshot should expose the server sim tick index");
+assert(moved.simTick > initial.simTick, "snapshot sim tick should advance as the server sim steps");
 assert.equal(typeof moved.simAccumulator, "number", "snapshot should expose the server fixed-step accumulator");
 assert(moved.simAccumulator >= 0 && moved.simAccumulator < 1 / 60, "snapshot accumulator should stay within one fixed step");
+
+const rightingSnapshotRound = makeRound();
+rightingSnapshotRound.sim = createSimState(rightingSnapshotRound, { now: 0, rng: () => 0 });
+const rightingSnapshotCar = rightingSnapshotRound.sim.cars.get("player:a");
+rightingSnapshotCar.manualRightingActive = true;
+rightingSnapshotCar.manualRightingElapsed = 0.12;
+rightingSnapshotCar.manualRightingTargetPosition.set(1, 2, 3);
+const rightingSnapshot = makeSnapshot("TEST", rightingSnapshotRound, 0);
+const rightingSnapshotPlayer = rightingSnapshot.cars.find((car) => car.sessionId === "a");
+assert.equal(rightingSnapshotPlayer.manualRighting.active, true, "snapshot should expose manual righting state");
+assert.deepEqual(
+  rightingSnapshotPlayer.manualRighting.targetPosition,
+  [1, 2, 3],
+  "snapshot should expose manual righting target position",
+);
 
 const queued = makeRound();
 queued.sim = createSimState(queued, { now: 0, rng: () => 0 });
@@ -67,10 +91,14 @@ const staleInput = makeRound();
 staleInput.sim = createSimState(staleInput, { now: 0, rng: () => 0 });
 staleInput.sim.inputs.set("a", { throttle: 1, steer: 0, boost: false });
 staleInput.sim.inputTimes.set("a", 0);
-tickSim(staleInput, 1000);
+tickSim(staleInput, 500);
+const freshCar = staleInput.sim.cars.get("player:a");
+assert.equal(freshCar.input.throttle, 1, "fresh player input should still be applied through normal jitter");
+tickSim(staleInput, 2000);
 const staleCar = staleInput.sim.cars.get("player:a");
 assert.equal(staleCar.input.throttle, 0, "stale player input should be zeroed");
 assert.equal(staleInput.sim.inputs.has("a"), false, "stale input should be removed from the sim");
+assert.equal(staleInput.sim.inputTimes.has("a"), false, "stale input timestamp should be removed from the sim");
 
 const bounded = makeRound({ arena: "green" });
 bounded.sim = createSimState(bounded, { now: 0, rng: () => 0 });
@@ -104,12 +132,32 @@ wheelTarget.isIt = false;
 wheelTarget.body.position.set(0, spawnHeight, 0);
 wheelTarget.body.velocity.set(0, 0, 0);
 wheelTarget.body.angularVelocity.set(0, 0, 0);
-wheelTagger.body.position.set(-frontLeftWheel.x, spawnHeight + 1.85 - frontLeftWheel.y, -frontLeftWheel.z);
+wheelTagger.body.position.set(-frontLeftWheel.x, spawnHeight + 1.3 - frontLeftWheel.y, -frontLeftWheel.z);
 wheelTagger.body.velocity.set(0, 0, 0);
 wheelTagger.body.angularVelocity.set(0, 0, 0);
+syncBodyHistory(wheelTarget);
+syncBodyHistory(wheelTagger);
 tickSim(wheelTagRound, 1000 / 60);
 assert.equal(wheelTarget.isIt, true, "wheel overlap should transfer tag even without chassis contact");
 assert.equal(wheelTagger.isIt, false, "wheel tagger should stop being it");
+
+const wheelNearMissRound = makeRound();
+wheelNearMissRound.sim = createSimState(wheelNearMissRound, { now: 0, rng: () => 0 });
+const wheelNearMissTagger = wheelNearMissRound.sim.cars.get("player:a");
+const wheelNearMissTarget = wheelNearMissRound.sim.cars.get("player:b");
+wheelNearMissTagger.isIt = true;
+wheelNearMissTarget.isIt = false;
+wheelNearMissTarget.body.position.set(0, spawnHeight, 0);
+wheelNearMissTarget.body.velocity.set(0, 0, 0);
+wheelNearMissTarget.body.angularVelocity.set(0, 0, 0);
+wheelNearMissTagger.body.position.set(-frontLeftWheel.x, spawnHeight + 3.0 - frontLeftWheel.y, -frontLeftWheel.z);
+wheelNearMissTagger.body.velocity.set(0, 0, 0);
+wheelNearMissTagger.body.angularVelocity.set(0, 0, 0);
+syncBodyHistory(wheelNearMissTarget);
+syncBodyHistory(wheelNearMissTagger);
+tickSim(wheelNearMissRound, 1000 / 60);
+assert.equal(wheelNearMissTagger.isIt, true, "wheel above the car should not tag without sphere-volume overlap");
+assert.equal(wheelNearMissTarget.isIt, false, "wheel near-miss target should not become it");
 
 const sweptRound = makeRound();
 sweptRound.sim = createSimState(sweptRound, { now: 0, rng: () => 0 });
@@ -121,6 +169,8 @@ sweptTagger.body.position.set(-8, spawnHeight, 0);
 sweptTagger.body.velocity.set(960, 0, 0);
 sweptTarget.body.position.set(0, spawnHeight, 0);
 sweptTarget.body.velocity.set(0, 0, 0);
+syncBodyHistory(sweptTagger);
+syncBodyHistory(sweptTarget);
 tickSim(sweptRound, 1000 / 60);
 assert.equal(sweptTarget.isIt, true, "swept tag volume overlap should transfer tag during high-speed crossing");
 assert.equal(sweptTagger.isIt, false, "swept tagger should stop being it");
@@ -135,6 +185,8 @@ nearMissTagger.body.position.set(-8, spawnHeight + 5, 0);
 nearMissTagger.body.velocity.set(960, 0, 0);
 nearMissTarget.body.position.set(0, spawnHeight, 0);
 nearMissTarget.body.velocity.set(0, 0, 0);
+syncBodyHistory(nearMissTagger);
+syncBodyHistory(nearMissTarget);
 tickSim(sweptNearMissRound, 1000 / 60);
 assert.equal(nearMissTagger.isIt, true, "swept tag should not fire on a near miss without volume overlap");
 assert.equal(nearMissTarget.isIt, false, "near-miss target should not become it");

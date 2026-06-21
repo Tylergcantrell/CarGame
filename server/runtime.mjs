@@ -14,6 +14,7 @@ import {
   mergeInput,
   tickSim,
 } from "./shared/cannon-multiplayer-sim.js";
+import { aiDifficultyIds, normalizeAiDifficulty } from "./shared/ai.js";
 import { protocolVersion } from "./shared/protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -29,6 +30,7 @@ const distDir = process.env.CLIENT_DIST_DIR
 const config = loadServerConfig();
 
 const validArenas = new Set(arenaIds);
+const validAiDifficulties = new Set(aiDifficultyIds);
 const colors = ["red", "teal", "gold", "blue", "purple", "green", "orange", "pink"];
 const roomVisibilities = new Set(["public", "private"]);
 
@@ -236,6 +238,7 @@ function createRoom(code, visibility = "private") {
       roundTime: 120,
       carCount: 4,
       arena: "orange",
+      aiDifficulty: "medium",
     },
     activeRound: null,
     roundTimer: null,
@@ -273,10 +276,14 @@ function getPlayerMinimum(room) {
 }
 
 function normalizeSettings(room, nextSettings) {
+  const nextAiDifficulty = Object.prototype.hasOwnProperty.call(nextSettings, "aiDifficulty")
+    ? normalizeAiDifficulty(nextSettings.aiDifficulty)
+    : normalizeAiDifficulty(room.settings.aiDifficulty);
   return {
     roundTime: clamp(Number(nextSettings.roundTime) || room.settings.roundTime, config.minRoundTime, config.maxRoundTime),
     carCount: clamp(Number(nextSettings.carCount) || room.settings.carCount, getPlayerMinimum(room), config.maxCars),
     arena: validArenas.has(nextSettings.arena) ? nextSettings.arena : room.settings.arena,
+    aiDifficulty: validAiDifficulties.has(nextAiDifficulty) ? nextAiDifficulty : "medium",
   };
 }
 
@@ -363,6 +370,7 @@ function publicState(room, selfId = null) {
   return {
     type: "state",
     protocolVersion,
+    serverTime: nowMs(),
     selfId,
     roomCode: room.code,
     roomVisibility: room.visibility,
@@ -607,6 +615,7 @@ function startRound(room, client) {
   broadcast(room, (selfId) => ({
     type: "roundStarted",
     roomCode: room.code,
+    serverTime: nowMs(),
     round: publicRound(room.activeRound, room.clients.get(selfId)?.sessionId),
   }));
   broadcastState(room);
