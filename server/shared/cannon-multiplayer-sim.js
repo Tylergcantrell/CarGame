@@ -26,14 +26,14 @@ const arenaWallColliderThickness = 4.5;
 const chassisBodyLift = 0.26;
 const sideSkidAngle = 0.52;
 const minWheelSupportDot = -0.34;
-const wheelTagSkin = 0.12;
+const wheelTagSkin = 0.02;
 const wheelTagBounds = {
-  minX: -1.42,
-  maxX: 1.42,
-  minY: -0.45,
-  maxY: 1.15,
-  minZ: -1.95,
-  maxZ: 2.15,
+  minX: -1.05,
+  maxX: 1.05,
+  minY: -0.32,
+  maxY: 0.88,
+  minZ: -1.55,
+  maxZ: 1.72,
 };
 const inputFreshnessTimeoutMs = 1500;
 const boostForce = new CANNON.Vec3();
@@ -1024,16 +1024,6 @@ function wheelCenterTouchesCar(wheel, car) {
   return dx * dx + dy * dy + dz * dz <= radius * radius;
 }
 
-function wheelCentersTouch(wheelA, wheelB) {
-  const positionA = wheelA.worldTransform.position;
-  const positionB = wheelB.worldTransform.position;
-  const radius = (wheelA.radius ?? wheelOptions.radius) + (wheelB.radius ?? wheelOptions.radius) + wheelTagSkin;
-  const dx = positionA.x - positionB.x;
-  const dy = positionA.y - positionB.y;
-  const dz = positionA.z - positionB.z;
-  return dx * dx + dy * dy + dz * dz <= radius * radius;
-}
-
 function playerInputIsFresh(sim, sessionId) {
   if (!sessionId || !sim.inputTimes.has(sessionId)) return true;
   return sim.lastTick - sim.inputTimes.get(sessionId) <= inputFreshnessTimeoutMs;
@@ -1041,25 +1031,17 @@ function playerInputIsFresh(sim, sessionId) {
 
 function processWheelTagContacts(sim, cars) {
   if (sim.tagCooldown > 0) return false;
+  const itCar = cars.find((car) => car.isIt) ?? null;
+  if (!itCar) return false;
   for (const car of cars) updateWheelTagTransforms(car);
 
-  for (let i = 0; i < cars.length - 1; i += 1) {
-    for (let j = i + 1; j < cars.length; j += 1) {
-      const carA = cars[i];
-      const carB = cars[j];
-      if (!carA.isIt && !carB.isIt) continue;
-
-      for (const wheel of carA.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carB)) return resolveTagPair(sim, carA, carB, "wheel-body");
-      }
-      for (const wheel of carB.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carA)) return resolveTagPair(sim, carA, carB, "wheel-body");
-      }
-      for (const wheelA of carA.vehicle.wheelInfos) {
-        for (const wheelB of carB.vehicle.wheelInfos) {
-          if (wheelCentersTouch(wheelA, wheelB)) return resolveTagPair(sim, carA, carB, "wheel-wheel");
-        }
-      }
+  for (const otherCar of cars) {
+    if (otherCar === itCar || otherCar.isIt) continue;
+    for (const wheel of itCar.vehicle.wheelInfos) {
+      if (wheelCenterTouchesCar(wheel, otherCar)) return resolveTagPair(sim, itCar, otherCar, "wheel-body");
+    }
+    for (const wheel of otherCar.vehicle.wheelInfos) {
+      if (wheelCenterTouchesCar(wheel, itCar)) return resolveTagPair(sim, itCar, otherCar, "wheel-body");
     }
   }
   return false;

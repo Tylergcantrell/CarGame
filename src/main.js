@@ -78,21 +78,18 @@ const tmpQuatB = new THREE.Quaternion();
 const networkCurrentQuat = new THREE.Quaternion();
 const networkTargetQuat = new THREE.Quaternion();
 const networkSmoothedQuat = new THREE.Quaternion();
-const predictionCurrentQuat = new THREE.Quaternion();
-const predictionTargetQuat = new THREE.Quaternion();
-const predictionSmoothedQuat = new THREE.Quaternion();
-const localPredictionDeadZoneSq = 0.0025;
-const localPredictionSnapDistanceSq = 324;
-const localPredictionCorrection = 0.18;
-const localPredictionFastCorrection = 0.38;
-const wheelTagSkin = 0.12;
+const visualCorrectionInverseQuat = new THREE.Quaternion();
+const visualCorrectionIdentityQuat = new THREE.Quaternion();
+const localVisualBeforePosition = new THREE.Vector3();
+const localVisualBeforeQuaternion = new THREE.Quaternion();
+const wheelTagSkin = 0.02;
 const wheelTagBounds = {
-  minX: -1.42,
-  maxX: 1.42,
-  minY: -0.45,
-  maxY: 1.15,
-  minZ: -1.95,
-  maxZ: 2.15,
+  minX: -1.05,
+  maxX: 1.05,
+  minY: -0.32,
+  maxY: 0.88,
+  minZ: -1.55,
+  maxZ: 1.72,
 };
 const carBodyVisualMatrix = new THREE.Matrix4();
 const wheelMatrix = new THREE.Matrix4();
@@ -161,12 +158,15 @@ const minWheelSupportDot = -0.34;
 const maxInputSendIntervalMs = 1000 / 60;
 const maxPredictionInputHistory = 180;
 const maxSeenReliableEvents = 256;
-const remoteInterpolationBaseDelayMs = 55;
-const remoteInterpolationMinDelayMs = 40;
-const remoteInterpolationMaxDelayMs = 220;
-const remoteInterpolationMaxExtrapolateMs = 140;
-const remoteSnapshotBufferLimit = 8;
-const remoteSnapDistanceSq = 225;
+const remoteInterpolationBaseDelayMs = 110;
+const remoteInterpolationMinDelayMs = 95;
+const remoteInterpolationMaxDelayMs = 190;
+const remoteInterpolationMaxExtrapolateMs = 120;
+const remoteSnapshotBufferLimit = 16;
+const remoteSnapDistanceSq = 900;
+const visualCorrectionDecayRate = 12;
+const visualCorrectionSnapDistanceSq = 900;
+const visualCorrectionMinDistanceSq = 0.0004;
 const maxPlayerNameLength = 14;
 const collisionGroups = {
   arena: 1,
@@ -2870,6 +2870,9 @@ function createCar({ id, name, color, isPlayer = false }) {
     wheelVisuals,
     visualWheelSpin: [0, 0, 0, 0],
     visualWheelSteer: [0, 0, 0, 0],
+    visualCorrectionPosition: new THREE.Vector3(),
+    visualCorrectionQuaternion: new THREE.Quaternion(),
+    visualCorrectionActive: false,
     input: makeInputState(),
     activeInWorld: true,
     currentSteering: 0,
@@ -3044,37 +3047,19 @@ function wheelCenterTouchesCar(wheel, car) {
   return dx * dx + dy * dy + dz * dz <= radius * radius;
 }
 
-function wheelCentersTouch(wheelA, wheelB) {
-  const positionA = wheelA.worldTransform.position;
-  const positionB = wheelB.worldTransform.position;
-  const radius = (wheelA.radius ?? wheelOptions.radius) + (wheelB.radius ?? wheelOptions.radius) + wheelTagSkin;
-  const dx = positionA.x - positionB.x;
-  const dy = positionA.y - positionB.y;
-  const dz = positionA.z - positionB.z;
-  return dx * dx + dy * dy + dz * dz <= radius * radius;
-}
-
 function processWheelTagContacts() {
   if (gameState.phase !== "playing" || gameState.tagCooldown > 0 || isMultiplayerRoundActive()) return false;
+  const itCar = gameState.itCar;
+  if (!itCar) return false;
   for (const car of gameState.cars) updateWheelTagTransforms(car);
 
-  for (let i = 0; i < gameState.cars.length - 1; i += 1) {
-    for (let j = i + 1; j < gameState.cars.length; j += 1) {
-      const carA = gameState.cars[i];
-      const carB = gameState.cars[j];
-      if (!carA.isIt && !carB.isIt) continue;
-
-      for (const wheel of carA.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carB)) return resolveCarTagPair(carA, carB);
-      }
-      for (const wheel of carB.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carA)) return resolveCarTagPair(carA, carB);
-      }
-      for (const wheelA of carA.vehicle.wheelInfos) {
-        for (const wheelB of carB.vehicle.wheelInfos) {
-          if (wheelCentersTouch(wheelA, wheelB)) return resolveCarTagPair(carA, carB);
-        }
-      }
+  for (const otherCar of gameState.cars) {
+    if (otherCar === itCar || otherCar.isIt) continue;
+    for (const wheel of itCar.vehicle.wheelInfos) {
+      if (wheelCenterTouchesCar(wheel, otherCar)) return resolveCarTagPair(itCar, otherCar);
+    }
+    for (const wheel of otherCar.vehicle.wheelInfos) {
+      if (wheelCenterTouchesCar(wheel, itCar)) return resolveCarTagPair(itCar, otherCar);
     }
   }
   return false;
@@ -3147,6 +3132,55 @@ function resetWheelGrip(car) {
   }
 }
 
+function clearVisualCorrection(car) {
+  if (!car) return;
+  car.visualCorrectionPosition?.set(0, 0, 0);
+  car.visualCorrectionQuaternion?.identity();
+  car.visualCorrectionActive = false;
+}
+
+function preserveCarVisualContinuity(car, beforePosition, beforeQuaternion, { snapDistanceSq = visualCorrectionSnapDistanceSq } = {}) {
+  if (!car || !beforePosition || !beforeQuaternion) return;
+  const correction = car.visualCorrectionPosition
+    .copy(beforePosition)
+    .sub(tmpVec3A.set(car.body.position.x, car.body.position.y, car.body.position.z));
+  const distanceSq = correction.lengthSq();
+  if (distanceSq > snapDistanceSq) {
+    clearVisualCorrection(car);
+    return;
+  }
+
+  visualCorrectionInverseQuat
+    .set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w)
+    .normalize()
+    .invert();
+  car.visualCorrectionQuaternion
+    .copy(beforeQuaternion)
+    .normalize()
+    .multiply(visualCorrectionInverseQuat)
+    .normalize();
+  car.visualCorrectionActive =
+    distanceSq > visualCorrectionMinDistanceSq ||
+    1 - Math.abs(car.visualCorrectionQuaternion.w) > 0.0001;
+  if (!car.visualCorrectionActive) clearVisualCorrection(car);
+}
+
+function applyCarVisualCorrection(car, dt) {
+  if (!car.visualCorrectionActive) return;
+  car.visual.position.add(car.visualCorrectionPosition);
+  car.visual.quaternion.premultiply(car.visualCorrectionQuaternion).normalize();
+
+  const decay = THREE.MathUtils.clamp(1 - Math.exp(-dt * visualCorrectionDecayRate), 0, 1);
+  car.visualCorrectionPosition.multiplyScalar(1 - decay);
+  car.visualCorrectionQuaternion.slerp(visualCorrectionIdentityQuat, decay);
+  if (
+    car.visualCorrectionPosition.lengthSq() <= visualCorrectionMinDistanceSq &&
+    1 - Math.abs(car.visualCorrectionQuaternion.w) <= 0.0001
+  ) {
+    clearVisualCorrection(car);
+  }
+}
+
 function spawnCarAt(car, spawn) {
   car.body.position.set(spawn.x, spawnHeight, spawn.z);
   car.body.velocity.set(0, 0, 0);
@@ -3175,6 +3209,7 @@ function spawnCarAt(car, spawn) {
   car.score = 0;
   car.isIt = false;
   car.immunityRemaining = 0;
+  clearVisualCorrection(car);
   syncChassisHistory(car);
   clearVehicleInputs(car);
   car.body.wakeUp();
@@ -3802,55 +3837,23 @@ function makeLocalSharedRound({ roundTime, arena, slots }) {
   return sharedRound;
 }
 
-function setPredictedCarFromSnapshot(carSnapshot, { soft = true } = {}) {
+function setPredictedCarFromSnapshot(carSnapshot) {
   const predictedCar = multiplayerState.predictedRound?.sim?.cars?.get(carSnapshot.key);
   if (!predictedCar) return;
   const body = predictedCar.body;
-  const dx = carSnapshot.position[0] - body.position.x;
-  const dy = carSnapshot.position[1] - body.position.y;
-  const dz = carSnapshot.position[2] - body.position.z;
-  const distanceSq = dx * dx + dy * dy + dz * dz;
-  if (!soft || distanceSq > localPredictionSnapDistanceSq) {
-    body.position.set(carSnapshot.position[0], carSnapshot.position[1], carSnapshot.position[2]);
-    body.velocity.set(carSnapshot.velocity[0], carSnapshot.velocity[1], carSnapshot.velocity[2]);
-    body.quaternion.set(
-      carSnapshot.quaternion[0],
-      carSnapshot.quaternion[1],
-      carSnapshot.quaternion[2],
-      carSnapshot.quaternion[3],
-    );
-    body.angularVelocity.set(
-      carSnapshot.angularVelocity?.[0] ?? 0,
-      carSnapshot.angularVelocity?.[1] ?? 0,
-      carSnapshot.angularVelocity?.[2] ?? 0,
-    );
-  } else if (distanceSq > localPredictionDeadZoneSq) {
-    const correction = distanceSq > 9 ? localPredictionFastCorrection : localPredictionCorrection;
-    body.position.x += dx * correction;
-    body.position.y += dy * correction;
-    body.position.z += dz * correction;
-    body.velocity.x += (carSnapshot.velocity[0] - body.velocity.x) * 0.22;
-    body.velocity.y += (carSnapshot.velocity[1] - body.velocity.y) * 0.22;
-    body.velocity.z += (carSnapshot.velocity[2] - body.velocity.z) * 0.22;
-    predictionCurrentQuat
-      .set(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w)
-      .normalize();
-    predictionTargetQuat
-      .set(carSnapshot.quaternion[0], carSnapshot.quaternion[1], carSnapshot.quaternion[2], carSnapshot.quaternion[3])
-      .normalize();
-    predictionSmoothedQuat.copy(predictionCurrentQuat).slerp(predictionTargetQuat, correction);
-    body.quaternion.set(
-      predictionSmoothedQuat.x,
-      predictionSmoothedQuat.y,
-      predictionSmoothedQuat.z,
-      predictionSmoothedQuat.w,
-    );
-    if (carSnapshot.angularVelocity) {
-      body.angularVelocity.x += (carSnapshot.angularVelocity[0] - body.angularVelocity.x) * 0.22;
-      body.angularVelocity.y += (carSnapshot.angularVelocity[1] - body.angularVelocity.y) * 0.22;
-      body.angularVelocity.z += (carSnapshot.angularVelocity[2] - body.angularVelocity.z) * 0.22;
-    }
-  }
+  body.position.set(carSnapshot.position[0], carSnapshot.position[1], carSnapshot.position[2]);
+  body.velocity.set(carSnapshot.velocity[0], carSnapshot.velocity[1], carSnapshot.velocity[2]);
+  body.quaternion.set(
+    carSnapshot.quaternion[0],
+    carSnapshot.quaternion[1],
+    carSnapshot.quaternion[2],
+    carSnapshot.quaternion[3],
+  );
+  body.angularVelocity.set(
+    carSnapshot.angularVelocity?.[0] ?? 0,
+    carSnapshot.angularVelocity?.[1] ?? 0,
+    carSnapshot.angularVelocity?.[2] ?? 0,
+  );
   predictedCar.body.force.set(0, 0, 0);
   predictedCar.body.torque.set(0, 0, 0);
   predictedCar.score = carSnapshot.score;
@@ -3861,6 +3864,25 @@ function setPredictedCarFromSnapshot(carSnapshot, { soft = true } = {}) {
   predictedCar.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? predictedCar.boostCooldownRemaining ?? 0;
 }
 
+function writeSharedCannonCarBodyState(car, sharedCar, { snap = false } = {}) {
+  if (!car || !sharedCar?.body) return;
+  writeCarBodyState(car, {
+    position: [sharedCar.body.position.x, sharedCar.body.position.y, sharedCar.body.position.z],
+    velocity: [sharedCar.body.velocity.x, sharedCar.body.velocity.y, sharedCar.body.velocity.z],
+    angularVelocity: [
+      sharedCar.body.angularVelocity.x,
+      sharedCar.body.angularVelocity.y,
+      sharedCar.body.angularVelocity.z,
+    ],
+    quaternion: [
+      sharedCar.body.quaternion.x,
+      sharedCar.body.quaternion.y,
+      sharedCar.body.quaternion.z,
+      sharedCar.body.quaternion.w,
+    ],
+  }, { snap });
+}
+
 function rebuildPredictionFromServerSnapshot(snapshot) {
   const predictedRound = multiplayerState.predictedRound;
   const sessionId = multiplayerState.sessionId;
@@ -3868,6 +3890,11 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
 
   const localSnapshot = snapshot.cars.find((carSnapshot) => carSnapshot.sessionId === sessionId);
   const predictedCar = localSnapshot ? predictedRound.sim.cars.get(localSnapshot.key) : null;
+  const preserveLocalVisual = Boolean(localSnapshot && predictedCar && gameState.phase === "playing");
+  if (preserveLocalVisual) {
+    localVisualBeforePosition.copy(playerCar.visual.position);
+    localVisualBeforeQuaternion.copy(playerCar.visual.quaternion);
+  }
   if (localSnapshot && predictedCar) {
     const dx = localSnapshot.position[0] - predictedCar.body.position.x;
     const dy = localSnapshot.position[1] - predictedCar.body.position.y;
@@ -3884,7 +3911,7 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     snapshot.simLastTick ?? snapshot.serverTime ?? Date.now(),
   );
   for (const carSnapshot of snapshot.cars) {
-    setPredictedCarFromSnapshot(carSnapshot, { soft: carSnapshot.sessionId === sessionId });
+    setPredictedCarFromSnapshot(carSnapshot);
   }
   predictedRound.sim.lastTick = baseTickNow;
   predictedRound.sim.accumulator = Math.max(0, Math.min(fixedStep, snapshot.simAccumulator ?? 0));
@@ -3903,9 +3930,12 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     predictedRound.clientTickNow = replayTickNow;
   }
 
-  for (const carSnapshot of snapshot.cars) {
-    if (carSnapshot.sessionId === sessionId) continue;
-    setPredictedCarFromSnapshot(carSnapshot, { soft: false });
+  if (preserveLocalVisual) {
+    const replayedLocalCar = predictedRound.sim.cars.get(localSnapshot.key);
+    if (replayedLocalCar) {
+      writeSharedCannonCarBodyState(playerCar, replayedLocalCar, { snap: true });
+      preserveCarVisualContinuity(playerCar, localVisualBeforePosition, localVisualBeforeQuaternion);
+    }
   }
 }
 
@@ -3979,10 +4009,12 @@ function resetNetworkCars() {
     car.networkKey = null;
     car.networkTarget = null;
     car.networkSnapshots = null;
+    clearVisualCorrection(car);
   }
   playerCar.networkKey = null;
   playerCar.networkTarget = null;
   playerCar.networkSnapshots = null;
+  clearVisualCorrection(playerCar);
   gameState.networkCars = [];
   gameState.networkCarByKey.clear();
   multiplayerState.localServerSnapshot = null;
@@ -4033,6 +4065,7 @@ function writeCarBodyState(car, snapshot, { snap = false } = {}) {
   if (snap) {
     car.body.previousPosition.copy(car.body.position);
     car.body.previousQuaternion.copy(car.body.quaternion);
+    clearVisualCorrection(car);
   }
   car.body.interpolatedPosition.copy(car.body.position);
   car.body.interpolatedQuaternion.copy(car.body.quaternion);
@@ -4061,39 +4094,48 @@ function setNetworkCarTarget(car, snapshot, serverTime, receivedAt = performance
   const dx = snapshot.position[0] - car.body.position.x;
   const dy = snapshot.position[1] - car.body.position.y;
   const dz = snapshot.position[2] - car.body.position.z;
-  if (firstTarget || dx * dx + dy * dy + dz * dz > remoteSnapDistanceSq) writeCarBodyState(car, snapshot);
+  if (firstTarget || dx * dx + dy * dy + dz * dz > remoteSnapDistanceSq) writeCarBodyState(car, snapshot, { snap: true });
 }
 
 function currentRemoteInterpolationDelay() {
   const jitter = Number.isFinite(multiplayerState.jitterMs) ? multiplayerState.jitterMs : 0;
+  const ping = Number.isFinite(multiplayerState.pingMs) ? multiplayerState.pingMs : 100;
   const avgSnapshot = averageSnapshotMs();
-  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.45 : remoteInterpolationBaseDelayMs;
+  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.7 : remoteInterpolationBaseDelayMs;
   return THREE.MathUtils.clamp(
-    Math.max(remoteInterpolationBaseDelayMs, cadenceDelay) + jitter * 0.7,
+    Math.max(remoteInterpolationBaseDelayMs, ping * 0.35 + cadenceDelay + jitter * 1.3),
     remoteInterpolationMinDelayMs,
     remoteInterpolationMaxDelayMs,
   );
 }
 
 function writeInterpolatedNetworkState(car, first, second, alpha) {
+  const durationSec = THREE.MathUtils.clamp((second.serverTime - first.serverTime) / 1000, 0.001, 0.25);
+  const t = THREE.MathUtils.clamp(alpha, 0, 1);
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const h00 = 2 * t3 - 3 * t2 + 1;
+  const h10 = t3 - 2 * t2 + t;
+  const h01 = -2 * t3 + 3 * t2;
+  const h11 = t3 - t2;
   car.body.position.set(
-    THREE.MathUtils.lerp(first.position[0], second.position[0], alpha),
-    THREE.MathUtils.lerp(first.position[1], second.position[1], alpha),
-    THREE.MathUtils.lerp(first.position[2], second.position[2], alpha),
+    h00 * first.position[0] + h10 * first.velocity[0] * durationSec + h01 * second.position[0] + h11 * second.velocity[0] * durationSec,
+    h00 * first.position[1] + h10 * first.velocity[1] * durationSec + h01 * second.position[1] + h11 * second.velocity[1] * durationSec,
+    h00 * first.position[2] + h10 * first.velocity[2] * durationSec + h01 * second.position[2] + h11 * second.velocity[2] * durationSec,
   );
   car.body.velocity.set(
-    THREE.MathUtils.lerp(first.velocity[0], second.velocity[0], alpha),
-    THREE.MathUtils.lerp(first.velocity[1], second.velocity[1], alpha),
-    THREE.MathUtils.lerp(first.velocity[2], second.velocity[2], alpha),
+    THREE.MathUtils.lerp(first.velocity[0], second.velocity[0], t),
+    THREE.MathUtils.lerp(first.velocity[1], second.velocity[1], t),
+    THREE.MathUtils.lerp(first.velocity[2], second.velocity[2], t),
   );
   car.body.angularVelocity.set(
-    THREE.MathUtils.lerp(first.angularVelocity[0], second.angularVelocity[0], alpha),
-    THREE.MathUtils.lerp(first.angularVelocity[1], second.angularVelocity[1], alpha),
-    THREE.MathUtils.lerp(first.angularVelocity[2], second.angularVelocity[2], alpha),
+    THREE.MathUtils.lerp(first.angularVelocity[0], second.angularVelocity[0], t),
+    THREE.MathUtils.lerp(first.angularVelocity[1], second.angularVelocity[1], t),
+    THREE.MathUtils.lerp(first.angularVelocity[2], second.angularVelocity[2], t),
   );
   networkCurrentQuat.set(first.quaternion[0], first.quaternion[1], first.quaternion[2], first.quaternion[3]).normalize();
   networkTargetQuat.set(second.quaternion[0], second.quaternion[1], second.quaternion[2], second.quaternion[3]).normalize();
-  networkSmoothedQuat.copy(networkCurrentQuat).slerp(networkTargetQuat, alpha);
+  networkSmoothedQuat.copy(networkCurrentQuat).slerp(networkTargetQuat, t);
   car.body.quaternion.set(
     networkSmoothedQuat.x,
     networkSmoothedQuat.y,
@@ -4166,27 +4208,6 @@ function updateNetworkControlledCars(dt) {
     }
     finalizeNetworkControlledBody(car);
   }
-}
-
-function reconcileLocalPlayer(dt) {
-  const snapshot = multiplayerState.localServerSnapshot;
-  if (!snapshot || !isMultiplayerRoundActive() || gameState.phase !== "playing") return;
-  const dx = snapshot.position[0] - playerCar.body.position.x;
-  const dy = snapshot.position[1] - playerCar.body.position.y;
-  const dz = snapshot.position[2] - playerCar.body.position.z;
-  const distanceSq = dx * dx + dy * dy + dz * dz;
-  if (distanceSq > 625) {
-    writeCarBodyState(playerCar, snapshot);
-    return;
-  }
-  if (distanceSq < 49) return;
-  const alpha = 1 - Math.exp(-dt * 1.35);
-  playerCar.body.position.x += dx * alpha;
-  playerCar.body.position.y += dy * alpha;
-  playerCar.body.position.z += dz * alpha;
-  playerCar.body.velocity.x += (snapshot.velocity[0] - playerCar.body.velocity.x) * alpha * 0.25;
-  playerCar.body.velocity.y += (snapshot.velocity[1] - playerCar.body.velocity.y) * alpha * 0.25;
-  playerCar.body.velocity.z += (snapshot.velocity[2] - playerCar.body.velocity.z) * alpha * 0.25;
 }
 
 function applyServerSnapshot(snapshot) {
@@ -5601,13 +5622,14 @@ function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
     .set(car.body.previousQuaternion.x, car.body.previousQuaternion.y, car.body.previousQuaternion.z, car.body.previousQuaternion.w)
     .slerp(tmpQuatB.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w), interpolationAlpha);
   car.visual.quaternion.copy(tmpQuat);
+  applyCarVisualCorrection(car, dt);
   carBodyVisualMatrix.compose(car.visual.position, car.visual.quaternion, car.visual.scale);
   setCarBodyVisualMatrix(car.bodyVisuals, car.visual.visible ? carBodyVisualMatrix : hiddenWheelMatrix);
 
   savedChassisPosition.copy(car.body.position);
   savedChassisQuaternion.copy(car.body.quaternion);
   car.body.position.set(car.visual.position.x, car.visual.position.y, car.visual.position.z);
-  car.body.quaternion.set(tmpQuat.x, tmpQuat.y, tmpQuat.z, tmpQuat.w);
+  car.body.quaternion.set(car.visual.quaternion.x, car.visual.quaternion.y, car.visual.quaternion.z, car.visual.quaternion.w);
 
   const wheelBaseIndex = car.wheelVisuals.slot * wheelsPerCar;
   const useSharedWheelVisuals = isSharedCannonRoundActive();
@@ -5894,7 +5916,6 @@ function runUnprofiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}
       applyBoost(car, fixedStep);
     }
     physics.step(fixedStep);
-    reconcileLocalPlayer(fixedStep);
     processPhysicsContacts();
     for (const car of gameState.cars) {
       if (!car.isNetworkControlled) applyQueuedJump(car);
@@ -6002,7 +6023,6 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
     previousPhase = setProfilePhase("physicsStep");
     bucketStart = performance.now();
     physics.step(fixedStep);
-    reconcileLocalPlayer(fixedStep);
     const physicsStepMs = performance.now() - bucketStart;
     recordProfileBucket("physicsStep", physicsStepMs);
     recordProfileSample("physicsStepMs", physicsStepMs);

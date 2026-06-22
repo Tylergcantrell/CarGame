@@ -76,6 +76,11 @@ function workerWsUrl(worker) {
   return `ws://127.0.0.1:${worker.port}`;
 }
 
+function workerWebSocketOptions() {
+  const origin = config.allowedOrigins[0];
+  return origin ? { headers: { Origin: origin } } : null;
+}
+
 function spawnWorker(index) {
   const port = workerPortBase + index;
   const child = spawn(process.execPath, [path.join(__dirname, "game-server.mjs")], {
@@ -137,15 +142,22 @@ function httpGetJson(url, timeoutMs = 1200) {
 }
 
 async function refreshWorkerStates() {
-  await Promise.all(workers.map(async (worker) => {
+  const results = await Promise.all(workers.map(async (worker) => {
     const state = await httpGetJson(workerUrl(worker, "/router-state"));
     if (state?.ok) {
       worker.lastState = state;
-      for (const room of state.rooms ?? []) {
-        if (room?.code) roomWorker.set(room.code, worker.index);
-      }
+      return { worker, rooms: state.rooms ?? [] };
     }
+    return { worker, rooms: null };
   }));
+  for (const result of results) {
+    if (!result.rooms) continue;
+    const liveRoomCodes = new Set(result.rooms.map((room) => room?.code).filter(Boolean));
+    for (const [roomCode, assignedIndex] of roomWorker) {
+      if (assignedIndex === result.worker.index && !liveRoomCodes.has(roomCode)) roomWorker.delete(roomCode);
+    }
+    for (const roomCode of liveRoomCodes) roomWorker.set(roomCode, result.worker.index);
+  }
 }
 
 function workersReady() {
@@ -227,7 +239,6 @@ function chooseWorkerForRoom(roomCode) {
       return a.index - b.index;
     });
   const worker = ranked[0] ?? workers[0];
-  if (cleanRoomCode) roomWorker.set(cleanRoomCode, worker.index);
   return worker;
 }
 
@@ -248,11 +259,36 @@ async function attachToWorker(client, message) {
     return;
   }
 
-  const upstream = new WebSocket(workerWsUrl(worker));
+  const upstreamOptions = workerWebSocketOptions();
+  const upstream = upstreamOptions
+    ? new WebSocket(workerWsUrl(worker), [], upstreamOptions)
+    : new WebSocket(workerWsUrl(worker));
   client.upstream = upstream;
   client.workerIndex = worker.index;
   let upstreamReady = false;
+  let upstreamAttachFailed = false;
+  let joinedRoomCode = "";
   const pending = [];
+
+  function clearClientUpstream() {
+    if (client.upstream === upstream) {
+      client.upstream = null;
+      client.forwardToWorker = null;
+      client.workerIndex = null;
+      client.workerClientId = null;
+      client.roomCode = "";
+    }
+    pending.length = 0;
+  }
+
+  async function failBeforeJoin() {
+    if (upstreamAttachFailed || joinedRoomCode) return;
+    upstreamAttachFailed = true;
+    if (roomWorker.get(roomCode) === worker.index) roomWorker.delete(roomCode);
+    clearClientUpstream();
+    sendClient(client, { type: "error", code: "worker_unavailable", message: "Game worker connection failed." });
+    sendClient(client, await aggregateRoomList());
+  }
 
   upstream.on("open", () => {
     upstreamReady = true;
@@ -278,6 +314,7 @@ async function attachToWorker(client, message) {
       }
       if (parsed.type === "joined" && parsed.roomCode) {
         roomWorker.set(parsed.roomCode, worker.index);
+        joinedRoomCode = parsed.roomCode;
         client.roomCode = parsed.roomCode;
       }
       if (parsed.type === "roomList") {
@@ -292,19 +329,17 @@ async function attachToWorker(client, message) {
   upstream.on("close", () => {
     const keepClientOpen = client.keepClientAfterUpstreamClose;
     client.keepClientAfterUpstreamClose = false;
-    if (client.upstream === upstream) {
-      client.upstream = null;
-      client.forwardToWorker = null;
-      client.workerIndex = null;
-      client.workerClientId = null;
-      client.roomCode = "";
+    clearClientUpstream();
+    if (!joinedRoomCode && !keepClientOpen) {
+      failBeforeJoin();
+      return;
     }
     if (!keepClientOpen && client.ws.readyState === WebSocket.OPEN) {
       client.ws.close(4001, "Game session closed.");
     }
   });
   upstream.on("error", () => {
-    sendClient(client, { type: "error", code: "worker_unavailable", message: "Game worker connection failed." });
+    failBeforeJoin();
   });
 
   client.forwardToWorker = (payload) => {
