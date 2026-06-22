@@ -103,9 +103,18 @@ target.isIt = false;
 target.body.position.copy(tagger.body.position);
 target.body.position.x += 0.8;
 target.body.position.z += 0.8;
-for (let i = 1; i <= 8; i += 1) tickSim(tagRound, i * 1000 / 60);
+const tagEvents = [];
+for (let i = 1; i <= 8; i += 1) {
+  tagEvents.push(...tickSim(tagRound, i * 1000 / 60).events);
+}
 assert.equal(target.isIt, true, "Cannon contact should transfer tag");
 assert.equal(tagger.isIt, false, "tagger should stop being it");
+assert.equal(tagEvents.length, 1, "tag transfer should emit one authoritative tag event");
+assert.equal(tagEvents[0].type, "tagConfirmed", "tag event should identify confirmed tags");
+assert.equal(tagEvents[0].taggerKey, "player:a", "tag event should include the tagger key");
+assert.equal(tagEvents[0].taggedKey, "player:b", "tag event should include the tagged key");
+assert.equal(tagEvents[0].contactType, "chassis-contact", "tag event should include the contact type");
+assert(Array.isArray(tagEvents[0].position) && tagEvents[0].position.length === 3, "tag event should include a contact position");
 
 const wheelTagRound = makeRound();
 wheelTagRound.sim = createSimState(wheelTagRound, { now: 0, rng: () => 0 });

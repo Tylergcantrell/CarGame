@@ -31,7 +31,7 @@ const config = loadServerConfig();
 
 const validArenas = new Set(arenaIds);
 const validAiDifficulties = new Set(aiDifficultyIds);
-const colors = ["red", "teal", "gold", "blue", "purple", "green", "orange", "pink"];
+const colors = ["red", "teal", "yellow", "blue", "purple", "green", "orange", "pink"];
 const roomVisibilities = new Set(["public", "private"]);
 
 const rooms = new Map();
@@ -45,16 +45,32 @@ const metrics = {
   messages: 0,
   inputs: 0,
   staleInputs: 0,
+  suspiciousInputs: 0,
   ignoredInputs: 0,
   droppedMessages: 0,
   rejections: {},
   snapshots: 0,
+  skippedSnapshots: 0,
+  reliableEventsQueued: 0,
+  reliableEventsSent: 0,
+  reliableEventsAcked: 0,
+  reliableEventsExpired: 0,
+  reliableEventsBackpressured: 0,
+  tagEvents: 0,
   roundsStarted: 0,
   roundsEnded: 0,
   simTicks: 0,
   simTickMsTotal: 0,
   simTickMsMax: 0,
 };
+
+const snapshotBackpressureBytes = 512 * 1024;
+const reliableBackpressureBytes = 1024 * 1024;
+const disconnectBackpressureBytes = 4 * 1024 * 1024;
+const reliableResendMs = 250;
+const reliableEventTtlMs = 10000;
+const maxInputSequenceJump = 300;
+const maxPlayerNameLength = 14;
 
 function recordRejection(reason) {
   metrics.droppedMessages += 1;
@@ -67,7 +83,7 @@ function nowMs() {
 
 function sanitizeName(value) {
   const clean = String(value ?? "").replace(/\s+/g, " ").trim();
-  return clean.slice(0, 18) || "Player";
+  return clean.slice(0, maxPlayerNameLength) || "Player";
 }
 
 function sanitizeRoomCode(value) {
@@ -247,17 +263,19 @@ function createRoom(code, visibility = "private") {
     lastActiveAt: nowMs(),
     roundsStarted: 0,
     snapshots: 0,
+    nextEventId: 1,
   };
   rooms.set(code, room);
   return room;
 }
 
 function destroyRoomIfEmpty(room) {
-  if (!room || room.clients.size > 0 || room.activeRound) return false;
+  if (!room || room.clients.size > 0) return false;
   clearTimeout(room.roundTimer);
   clearInterval(room.simTimer);
   room.roundTimer = null;
   room.simTimer = null;
+  room.activeRound = null;
   rooms.delete(room.code);
   return true;
 }
@@ -404,6 +422,69 @@ function sendRaw(client, payloadJson) {
   client.ws.send(payloadJson);
 }
 
+function closeIfBadlyBackpressured(client) {
+  if (client.ws.bufferedAmount <= disconnectBackpressureBytes) return false;
+  metrics.terminatedConnections += 1;
+  client.ws.close(4002, "Client is too far behind.");
+  return true;
+}
+
+function sendSnapshot(client, payload) {
+  if (client.ws.readyState !== client.ws.OPEN) return false;
+  if (closeIfBadlyBackpressured(client)) return false;
+  if (client.ws.bufferedAmount > snapshotBackpressureBytes) {
+    client.skippedSnapshots += 1;
+    metrics.skippedSnapshots += 1;
+    return false;
+  }
+  client.ws.send(JSON.stringify(payload));
+  return true;
+}
+
+function flushReliableEvents(client, now = nowMs()) {
+  if (!client.pendingReliableEvents?.size || client.ws.readyState !== client.ws.OPEN) return;
+  if (closeIfBadlyBackpressured(client)) return;
+  for (const [eventId, pending] of client.pendingReliableEvents) {
+    if (now - pending.createdAt > reliableEventTtlMs) {
+      client.pendingReliableEvents.delete(eventId);
+      metrics.reliableEventsExpired += 1;
+      continue;
+    }
+    if (now - pending.lastSentAt < reliableResendMs) continue;
+    if (client.ws.bufferedAmount > reliableBackpressureBytes) {
+      metrics.reliableEventsBackpressured += 1;
+      break;
+    }
+    pending.lastSentAt = now;
+    sendRaw(client, pending.payloadJson);
+    metrics.reliableEventsSent += 1;
+  }
+}
+
+function enqueueReliableEvent(client, event, now = nowMs()) {
+  if (client.ws.readyState !== client.ws.OPEN) return;
+  client.pendingReliableEvents.set(event.eventId, {
+    payloadJson: JSON.stringify(event),
+    createdAt: now,
+    lastSentAt: 0,
+  });
+  metrics.reliableEventsQueued += 1;
+  flushReliableEvents(client, now);
+}
+
+function broadcastReliableEvent(room, event) {
+  const now = nowMs();
+  const eventWithId = {
+    ...event,
+    roomCode: room.code,
+    eventId: room.nextEventId,
+    serverTime: now,
+  };
+  room.nextEventId += 1;
+  for (const client of room.clients.values()) enqueueReliableEvent(client, eventWithId, now);
+  return eventWithId;
+}
+
 function broadcast(room, payloadFactory = publicState) {
   if (typeof payloadFactory !== "function") {
     const payloadJson = JSON.stringify(payloadFactory);
@@ -423,10 +504,26 @@ function publicSnapshotForClient(snapshot, client) {
   if (!snapshot || !client) return snapshot;
   return {
     ...snapshot,
-    cars: snapshot.cars.map((car) => ({
-      ...car,
-      sessionId: car.sessionId === client.sessionId ? car.sessionId : null,
-    })),
+    cars: snapshot.cars.map((car) => {
+      const isSelf = car.sessionId === client.sessionId;
+      return {
+        key: car.key,
+        position: car.position,
+        quaternion: car.quaternion,
+        velocity: car.velocity,
+        angularVelocity: car.angularVelocity,
+        score: car.score,
+        isIt: car.isIt,
+        immunityRemaining: car.immunityRemaining,
+        boostTimeRemaining: car.boostTimeRemaining,
+        boostCooldownRemaining: car.boostCooldownRemaining,
+        input: car.input,
+        ...(isSelf ? {
+          sessionId: car.sessionId,
+          inputSequence: car.inputSequence,
+        } : {}),
+      };
+    }),
   };
 }
 
@@ -484,7 +581,8 @@ function publicResultsForClient(results, client) {
 
 function broadcastSnapshot(room, snapshot) {
   for (const client of room.clients.values()) {
-    send(client, publicSnapshotForClient(snapshot, client));
+    flushReliableEvents(client);
+    sendSnapshot(client, publicSnapshotForClient(snapshot, client));
   }
 }
 
@@ -548,12 +646,28 @@ function tickRoom(room) {
   metrics.simTicks += 1;
   metrics.simTickMsTotal += tickMs;
   metrics.simTickMsMax = Math.max(metrics.simTickMsMax, tickMs);
+  if (result.events?.length) {
+    for (const event of result.events) {
+      if (event.type === "tagConfirmed") metrics.tagEvents += 1;
+      broadcastReliableEvent(room, {
+        ...event,
+        roundId: round.id,
+      });
+    }
+  }
   if (result.tagChanged) room.lastActiveAt = now;
   maybeBroadcastSnapshot(room, round, now);
 }
 
 function maybeBroadcastSnapshot(room, round, now) {
-  if (now - round.sim.lastSnapshot < 1000 / config.snapshotRate) return;
+  const snapshotIntervalMs = 1000 / config.snapshotRate;
+  round.sim.nextSnapshotAt ??= now;
+  if (now + 1 < round.sim.nextSnapshotAt) return;
+  if (now - round.sim.nextSnapshotAt > snapshotIntervalMs * 4) {
+    round.sim.nextSnapshotAt = now + snapshotIntervalMs;
+  } else {
+    round.sim.nextSnapshotAt += snapshotIntervalMs;
+  }
   round.sim.lastSnapshot = now;
   const snapshot = makeSimSnapshot(room.code, round, now);
   if (snapshot) {
@@ -641,6 +755,7 @@ function rejectMessage(client, reason = "unknown") {
 function leaveRoom(client) {
   const room = client.room;
   if (!room) return;
+  client.pendingReliableEvents.clear();
   room.clients.delete(client.id);
   room.sessions.set(client.sessionId, {
     publicId: client.publicId,
@@ -788,6 +903,13 @@ function handleMessage(client, raw) {
     return;
   }
 
+  if (message.type === "ackEvent") {
+    if (!rateLimit(client, "events", 40)) return rejectMessage(client, "event_ack_rate_limit");
+    const eventId = Math.max(0, Math.floor(Number(message.eventId) || 0));
+    if (client.pendingReliableEvents.delete(eventId)) metrics.reliableEventsAcked += 1;
+    return;
+  }
+
   if (message.type === "joinRoom") {
     if (!rateLimit(client, "lobby", 6)) return rejectMessage(client, "lobby_rate_limit");
     joinRequestedRoom(client, {
@@ -870,8 +992,14 @@ function handleMessage(client, raw) {
       return;
     }
     const sequence = Math.max(0, Math.floor(Number(message.sequence) || 0));
-    if (sequence < (round.sim.inputSequences.get(client.sessionId) ?? 0)) {
+    const previousSequence = round.sim.inputSequences.get(client.sessionId) ?? 0;
+    if (sequence < previousSequence) {
       metrics.staleInputs += 1;
+      return;
+    }
+    if (sequence > previousSequence + maxInputSequenceJump) {
+      metrics.suspiciousInputs += 1;
+      rejectMessage(client, "input_sequence_jump");
       return;
     }
     metrics.inputs += 1;
@@ -905,6 +1033,8 @@ wss.on("connection", (ws) => {
     alive: true,
     rate: {},
     droppedMessages: 0,
+    skippedSnapshots: 0,
+    pendingReliableEvents: new Map(),
   };
   clients.set(client.id, client);
   send(client, { type: "welcome", id: client.id, sessionId: client.sessionId, protocolVersion, colors });
@@ -933,6 +1063,7 @@ function startMaintenanceTimers() {
       }
       client.alive = false;
       client.ws.ping();
+      flushReliableEvents(client);
     }
   }, 15000);
   heartbeatTimer.unref();

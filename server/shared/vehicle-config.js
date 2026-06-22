@@ -81,7 +81,7 @@ export const vehicleTuning = {
 export const carPalette = [
   { name: "red", hex: 0xb80028, css: "#b80028" },
   { name: "teal", hex: 0x009b96, css: "#009b96" },
-  { name: "gold", hex: 0xc98518, css: "#c98518" },
+  { name: "yellow", hex: 0xc98518, css: "#c98518" },
   { name: "blue", hex: 0x2458d9, css: "#2458d9" },
   { name: "purple", hex: 0x5e32c8, css: "#5e32c8" },
   { name: "green", hex: 0x4fa832, css: "#4fa832" },

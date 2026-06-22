@@ -13,7 +13,7 @@ const expectedSnapshotHz = Number(process.env.STRESS_MIN_SNAPSHOT_HZ ?? 8);
 const countdownMs = Number(process.env.STRESS_COUNTDOWN_MS ?? 3000);
 const ackGraceSequences = Number(process.env.STRESS_ACK_GRACE_SEQUENCES ?? Math.ceil(inputHz * 1.5));
 const roomPrefix = process.env.STRESS_ROOM_PREFIX ?? `S${Math.floor(Math.random() * 900 + 100)}`;
-const colors = ["red", "teal", "gold", "blue", "purple", "green", "orange", "pink"];
+const colors = ["red", "teal", "yellow", "blue", "purple", "green", "orange", "pink"];
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));

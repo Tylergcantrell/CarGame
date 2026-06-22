@@ -25,6 +25,7 @@ const lastTouchCommandAt = {
   boost: -Infinity,
   jump: -Infinity,
 };
+let joystickIdleTimer = null;
 
 function isTypingTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
@@ -101,6 +102,18 @@ function resetJoystickInput(joystickKnobEl) {
   touchInput.joystickCenterY = 0;
   touchInput.joystickRadius = 0;
   joystickKnobEl.style.transform = "translate(-50%, -50%)";
+}
+
+function markJoystickActive(joystickEl) {
+  clearTimeout(joystickIdleTimer);
+  joystickEl.closest(".touch-controls")?.classList.add("active");
+}
+
+function scheduleJoystickIdle(joystickEl) {
+  clearTimeout(joystickIdleTimer);
+  joystickIdleTimer = setTimeout(() => {
+    joystickEl.closest(".touch-controls")?.classList.remove("active");
+  }, 900);
 }
 
 function handleTouchCommand(event, command) {
@@ -184,6 +197,7 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
     touchInput.joystickCenterY = rect.top + rect.height * 0.5;
     touchInput.joystickRadius = rect.width * 0.42;
     if (joystickEl.setPointerCapture) joystickEl.setPointerCapture(event.pointerId);
+    markJoystickActive(joystickEl);
     setJoystickInput(event.clientX, event.clientY, joystickKnobEl);
   });
 
@@ -191,6 +205,7 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
     if (touchInput.joystickPointerId !== event.pointerId) return;
     cancelTouchEvent(event);
     event.stopPropagation();
+    markJoystickActive(joystickEl);
     setJoystickInput(event.clientX, event.clientY, joystickKnobEl);
   });
 
@@ -198,6 +213,7 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
     joystickEl.addEventListener(eventName, (event) => {
       if (touchInput.joystickPointerId !== event.pointerId && eventName !== "lostpointercapture") return;
       resetJoystickInput(joystickKnobEl);
+      scheduleJoystickIdle(joystickEl);
     });
   }
 

@@ -975,7 +975,24 @@ function finalizeCarSurfaceContacts(cars) {
   }
 }
 
-function resolveTagPair(sim, carA, carB) {
+function makeTagEvent(sim, tagger, tagged, contactType) {
+  return {
+    type: "tagConfirmed",
+    tick: sim.tick + 1,
+    taggerKey: tagger.key,
+    taggedKey: tagged.key,
+    previousItKey: tagger.key,
+    newItKey: tagged.key,
+    contactType,
+    position: [
+      (tagger.body.position.x + tagged.body.position.x) / 2,
+      (tagger.body.position.y + tagged.body.position.y) / 2,
+      (tagger.body.position.z + tagged.body.position.z) / 2,
+    ],
+  };
+}
+
+function resolveTagPair(sim, carA, carB, contactType = "chassis-contact") {
   if (!carA || !carB || carA === carB || sim.tagCooldown > 0) return false;
   const itCar = carA.isIt ? carA : carB.isIt ? carB : null;
   const other = itCar === carA ? carB : itCar === carB ? carA : null;
@@ -985,6 +1002,7 @@ function resolveTagPair(sim, carA, carB) {
   other.isIt = true;
   other.immunityRemaining = 0;
   sim.tagCooldown = 0.28;
+  sim.pendingEvents.push(makeTagEvent(sim, itCar, other, contactType));
   return true;
 }
 
@@ -1032,14 +1050,14 @@ function processWheelTagContacts(sim, cars) {
       if (!carA.isIt && !carB.isIt) continue;
 
       for (const wheel of carA.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carB)) return resolveTagPair(sim, carA, carB);
+        if (wheelCenterTouchesCar(wheel, carB)) return resolveTagPair(sim, carA, carB, "wheel-body");
       }
       for (const wheel of carB.vehicle.wheelInfos) {
-        if (wheelCenterTouchesCar(wheel, carA)) return resolveTagPair(sim, carA, carB);
+        if (wheelCenterTouchesCar(wheel, carA)) return resolveTagPair(sim, carA, carB, "wheel-body");
       }
       for (const wheelA of carA.vehicle.wheelInfos) {
         for (const wheelB of carB.vehicle.wheelInfos) {
-          if (wheelCentersTouch(wheelA, wheelB)) return resolveTagPair(sim, carA, carB);
+          if (wheelCentersTouch(wheelA, wheelB)) return resolveTagPair(sim, carA, carB, "wheel-wheel");
         }
       }
     }
@@ -1064,7 +1082,7 @@ function processContacts(round, cars) {
       addCarSurfaceContact(carB, contact, false);
       continue;
     }
-    if (resolveTagPair(sim, carA, carB)) {
+    if (resolveTagPair(sim, carA, carB, "chassis-contact")) {
       changed = true;
       break;
     }
@@ -1158,14 +1176,15 @@ export function createSimState(round, { now = Date.now(), rng = null } = {}) {
     lastSnapshot: 0,
     accumulator: 0,
     tagCooldown: 0,
+    pendingEvents: [],
   };
 }
 
 export function tickSim(round, now) {
-  if (!round?.sim) return { tagChanged: false, steps: 0 };
+  if (!round?.sim) return { tagChanged: false, steps: 0, events: [] };
   const elapsed = clamp((now - round.sim.lastTick) / 1000, 0, fixedStep * maxCatchupSteps);
   round.sim.lastTick = now;
-  if (now < round.playStartsAt) return { tagChanged: false, steps: 0 };
+  if (now < round.playStartsAt) return { tagChanged: false, steps: 0, events: [] };
   round.sim.accumulator = Math.min(round.sim.accumulator + elapsed, fixedStep * maxCatchupSteps);
   let steps = 0;
   let tagChanged = false;
@@ -1175,7 +1194,8 @@ export function tickSim(round, now) {
     round.sim.tick += 1;
     round.sim.accumulator -= fixedStep;
   }
-  return { tagChanged, steps };
+  const events = round.sim.pendingEvents.splice(0);
+  return { tagChanged, steps, events };
 }
 
 export function makeSnapshot(roomCode, round, now = Date.now()) {

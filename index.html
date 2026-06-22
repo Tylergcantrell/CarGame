@@ -33,21 +33,9 @@
             <div class="connection-row" id="profile-row">
               <label id="name-field">
                 <span>Driver</span>
-                <input id="multiplayer-name" type="text" maxlength="18" autocomplete="off" />
+                <input id="multiplayer-name" type="text" maxlength="14" autocomplete="off" />
               </label>
               <button class="secondary-action danger-action" id="connect-server" type="button">Leave Room</button>
-            </div>
-            <div class="multiplayer-section" id="private-room-section">
-              <div class="section-head">
-                <strong>Private Room</strong>
-              </div>
-              <div class="private-room-row">
-                <label id="room-code-field">
-                  <span>Room Code</span>
-                  <input id="room-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" />
-                </label>
-                <button class="secondary-action" id="join-room" type="button">Join</button>
-              </div>
             </div>
             <div class="multiplayer-section" id="public-room-section">
               <div class="section-head">
@@ -65,13 +53,6 @@
                 <label>
                   <span>Room Code</span>
                   <input id="create-room-code" type="text" maxlength="6" autocomplete="off" autocapitalize="characters" spellcheck="false" />
-                </label>
-                <label>
-                  <span>Access</span>
-                  <select id="room-visibility">
-                    <option value="public" selected>Public</option>
-                    <option value="private">Private</option>
-                  </select>
                 </label>
               </div>
               <div class="create-room-actions">
@@ -178,6 +159,7 @@
       <div class="round-actions">
         <div class="network-hud hidden" id="network-hud">-- ms</div>
         <div class="timer" id="round-timer">2:00</div>
+        <button class="leaderboard-toggle" id="leaderboard-toggle" type="button" aria-pressed="true">Hide Leaderboard</button>
         <button class="menu-return" id="menu-return" type="button" aria-label="Back to menu">Menu</button>
       </div>
       <button class="boost-meter" id="boost" type="button" style="--boost-ready: 100%" aria-label="Boost">

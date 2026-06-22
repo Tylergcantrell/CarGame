@@ -124,14 +124,31 @@ ALLOWED_ORIGINS=http://127.0.0.1:8787 SESSION_SECRET=local-prod-check-secret npm
 - Late join lobby behavior.
 - Persistent session IDs for reconnect.
 - Server-owned round timer, scores, tags, snapshots, and input acknowledgement.
+- Confirmed tag transfers emit explicit server-authoritative `tagConfirmed` events with room event IDs, server time, sim tick, tagger/tagged car keys, contact type, and contact position.
+- Critical tag events are acknowledged by clients and resent for a bounded window; clients dedupe by event ID, while snapshots remain the durable state source.
 - Shared Cannon simulation module used by solo play, browser multiplayer prediction, and the authoritative Node server.
 - Shared gameplay includes the Cannon world config, RaycastVehicle tuning, chassis collider shapes, arena physics bodies, boost, jump, aerial control, recovery, scoring, tag transfer, and AI via `server/shared/ai.js`.
 - Snapshot timing includes server sim tick and accumulator state so browser prediction rebuilds preserve fixed-step phase.
 - Queued jump/recovery and boost inputs merge until the shared sim consumes them, preventing short input pulses from being overwritten before a server tick.
 - Protocol version check on connect so stale clients are rejected instead of failing silently.
-- Message size limit, per-client rate limits, config validation, and rejection counters in `/metrics`.
+- Message size limit, per-client rate limits, input sequence jump rejection, config validation, and rejection counters in `/metrics`.
+- Snapshot sends check WebSocket backpressure. Slow clients can skip replaceable snapshots, but reliable tag events are retried before expiry.
 - Unexpected client socket closes auto-reconnect from the browser using the previous lobby/room intent and persistent session ID.
 - Static `dist/` serving from the same Node process.
+
+## Tag Fairness Model
+
+The server is the only source of truth for tag transfers. Tags are currently decided from the authoritative Cannon simulation using chassis contact plus the existing wheel/body overlap checks. There is no deep lag rewind and no client-authoritative hit claim.
+
+When a tag transfers, the server changes the authoritative `isIt` state and emits a `tagConfirmed` event. Clients use that event for immediate visible feedback, then continue to accept snapshots as the state correction path. The event `contactType` is one of:
+
+```text
+chassis-contact
+wheel-body
+wheel-wheel
+```
+
+The main tuning constants live in `server/shared/cannon-multiplayer-sim.js` and `server/shared/vehicle-config.js`, including `wheelTagSkin`, `wheelTagBounds`, `vehicleTuning.tagImmunityDuration`, and the shared `tagCooldown`.
 
 ## Launch Readiness
 

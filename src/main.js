@@ -158,6 +158,15 @@ const arenaWallPoint = new THREE.Vector3();
 const tagBursts = [];
 const minWheelSupportDot = -0.34;
 const maxInputSendIntervalMs = 1000 / 60;
+const maxPredictionInputHistory = 180;
+const maxSeenReliableEvents = 256;
+const remoteInterpolationBaseDelayMs = 55;
+const remoteInterpolationMinDelayMs = 40;
+const remoteInterpolationMaxDelayMs = 220;
+const remoteInterpolationMaxExtrapolateMs = 140;
+const remoteSnapshotBufferLimit = 8;
+const remoteSnapDistanceSq = 225;
+const maxPlayerNameLength = 14;
 const collisionGroups = {
   arena: 1,
   car: 2,
@@ -2465,6 +2474,7 @@ const endScreenEl = document.querySelector("#end-screen");
 const startRoundButton = document.querySelector("#start-round");
 const playAgainButton = document.querySelector("#play-again");
 const menuReturnButton = document.querySelector("#menu-return");
+const leaderboardToggleButton = document.querySelector("#leaderboard-toggle");
 const roundTimeSelect = document.querySelector("#round-time");
 const playerCountSelect = document.querySelector("#player-count");
 const arenaSelect = document.querySelector("#arena-select");
@@ -2478,24 +2488,20 @@ const multiplayerTitleEl = document.querySelector("#multiplayer-title");
 const multiplayerSubtitleEl = document.querySelector("#multiplayer-subtitle");
 const connectionPillEl = document.querySelector("#connection-pill");
 const multiplayerNameInput = document.querySelector("#multiplayer-name");
-const roomCodeInput = document.querySelector("#room-code");
 const createRoomCodeInput = document.querySelector("#create-room-code");
 const nameFieldEl = document.querySelector("#name-field");
-const roomCodeFieldEl = document.querySelector("#room-code-field");
 const connectServerButton = document.querySelector("#connect-server");
-const roomVisibilitySelect = document.querySelector("#room-visibility");
 const createRoomOpenButton = document.querySelector("#create-room-open");
 const createRoomButton = document.querySelector("#create-room");
 const createRoomCancelButton = document.querySelector("#create-room-cancel");
-const joinRoomButton = document.querySelector("#join-room");
 const refreshRoomsButton = document.querySelector("#refresh-rooms");
-const privateRoomSectionEl = document.querySelector("#private-room-section");
 const publicRoomSectionEl = document.querySelector("#public-room-section");
 const createRoomPanelEl = document.querySelector("#create-room-panel");
 const roomBrowserEl = document.querySelector("#room-browser");
 const roomSummaryEl = document.querySelector("#room-summary");
 const lobbyStatusEl = document.querySelector("#lobby-status");
 const lobbyListEl = document.querySelector("#lobby-list");
+const lastResultsEl = document.querySelector("#last-results");
 const roundTimerEl = document.querySelector("#round-timer");
 const itBannerEl = document.querySelector("#it-banner");
 const chasePressureEl = document.querySelector("#chase-pressure");
@@ -2540,6 +2546,7 @@ const gameState = {
   sharedSessionId: "solo",
   itCar: null,
   tagCooldown: 0,
+  leaderboardVisible: true,
   leaderboardDirty: true,
   lastLeaderboardRender: 0,
   pausedFromPhase: null,
@@ -2553,11 +2560,14 @@ const configuredServerUrl = String(
 ).trim();
 const defaultServerUrl = configuredServerUrl ||
   `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname || "127.0.0.1"}:8787`;
-const storedPlayerName = localStorage.getItem("carTagPlayerName") ?? `Player ${Math.floor(Math.random() * 900 + 100)}`;
+function sanitizePlayerName(value) {
+  const clean = String(value ?? "").replace(/\s+/g, " ").trim().slice(0, maxPlayerNameLength);
+  return clean || `Player ${Math.floor(Math.random() * 900 + 100)}`;
+}
+
+const storedPlayerName = sanitizePlayerName(localStorage.getItem("carTagPlayerName"));
 multiplayerNameInput.value = storedPlayerName;
-roomCodeInput.value = localStorage.getItem("carTagRoomCode") ?? "";
 createRoomCodeInput.value = "";
-roomVisibilitySelect.value = localStorage.getItem("carTagRoomVisibility") ?? "public";
 
 const multiplayerState = {
   mode: "solo",
@@ -2569,8 +2579,8 @@ const multiplayerState = {
   lastConnectionOptions: null,
   selfId: null,
   sessionId: localStorage.getItem("carTagSessionId") ?? "",
-  roomCode: roomCodeInput.value,
-  roomVisibility: localStorage.getItem("carTagRoomVisibility") ?? "public",
+  roomCode: "",
+  roomVisibility: "public",
   controllerId: null,
   phase: "lobby",
   clients: [],
@@ -2585,6 +2595,7 @@ const multiplayerState = {
     carCount: 4,
     arena: "orange",
   },
+  lastResults: null,
   round: null,
   activeRoundId: null,
   predictedRound: null,
@@ -2593,9 +2604,12 @@ const multiplayerState = {
   inputSequence: 0,
   predictionInputHistory: [],
   acknowledgedInputSequence: 0,
+  seenReliableEvents: new Set(),
+  seenReliableEventOrder: [],
   localServerSnapshot: null,
   lastSnapshotAt: 0,
   snapshotIntervals: [],
+  serverClockOffsetMs: null,
   pingSequence: 0,
   pingSentAt: 0,
   lastPingAt: 0,
@@ -2607,6 +2621,17 @@ const multiplayerState = {
     maxCorrection: 0,
     lastCorrection: 0,
     largeCorrections: 0,
+  },
+  remoteInterpolationStats: {
+    delayMs: remoteInterpolationBaseDelayMs,
+    extrapolations: 0,
+    bufferUnderruns: 0,
+    bufferSamples: 0,
+    bufferSampleCount: 0,
+    maxBufferSize: 0,
+    lastUiExtrapolations: 0,
+    lastUiSampleAt: 0,
+    extrapolationsPerSecond: 0,
   },
 };
 
@@ -3265,19 +3290,14 @@ function cloneInputSnapshot(inputSnapshot = {}) {
   };
 }
 
-function recordPredictionInputSample(sharedRound, sessionId, tickNow) {
-  if (!multiplayerState.predictedRound || !sessionId || !sharedRound?.sim) return;
-  const inputSnapshot = cloneInputSnapshot(sharedRound.sim.inputs.get(sessionId));
+function recordPredictionInputSample(sequence, inputSnapshot, tickNow) {
+  if (!multiplayerState.predictedRound || sequence <= 0) return;
   multiplayerState.predictionInputHistory.push({
     tickNow,
-    sequence: multiplayerState.inputSequence,
-    input: inputSnapshot,
+    sequence,
+    input: cloneInputSnapshot(inputSnapshot),
   });
-  const minTickNow = tickNow - 2500;
-  while (
-    multiplayerState.predictionInputHistory.length > 0 &&
-    multiplayerState.predictionInputHistory[0].tickNow < minTickNow
-  ) {
+  while (multiplayerState.predictionInputHistory.length > maxPredictionInputHistory) {
     multiplayerState.predictionInputHistory.shift();
   }
 }
@@ -3288,12 +3308,77 @@ function sendServerMessage(payload) {
   return true;
 }
 
+function acknowledgeReliableEvent(message) {
+  const eventId = Math.floor(Number(message.eventId) || 0);
+  if (eventId > 0) sendServerMessage({ type: "ackEvent", eventId });
+}
+
+function rememberReliableEvent(message) {
+  const eventId = Math.floor(Number(message.eventId) || 0);
+  if (eventId <= 0) return true;
+  const key = `${message.roomCode ?? multiplayerState.roomCode}:${eventId}`;
+  if (multiplayerState.seenReliableEvents.has(key)) return false;
+  multiplayerState.seenReliableEvents.add(key);
+  multiplayerState.seenReliableEventOrder.push(key);
+  while (multiplayerState.seenReliableEventOrder.length > maxSeenReliableEvents) {
+    const expired = multiplayerState.seenReliableEventOrder.shift();
+    multiplayerState.seenReliableEvents.delete(expired);
+  }
+  return true;
+}
+
+function setPredictedItFromTagEvent(event) {
+  const predictedCars = multiplayerState.predictedRound?.sim?.cars;
+  if (!predictedCars) return;
+  for (const car of predictedCars.values()) car.isIt = false;
+  const predictedTagger = predictedCars.get(event.taggerKey);
+  const predictedTagged = predictedCars.get(event.taggedKey);
+  if (predictedTagger) {
+    predictedTagger.isIt = false;
+    predictedTagger.immunityRemaining = vehicleTuning.tagImmunityDuration;
+  }
+  if (predictedTagged) {
+    predictedTagged.isIt = true;
+    predictedTagged.immunityRemaining = 0;
+  }
+}
+
+function applyTagConfirmedEvent(event) {
+  if (event.roundId !== multiplayerState.activeRoundId || gameState.phase !== "playing") return;
+  const tagger = gameState.networkCarByKey.get(event.taggerKey);
+  const tagged = gameState.networkCarByKey.get(event.taggedKey);
+  if (!tagged) return;
+
+  for (const car of gameState.cars) car.isIt = false;
+  if (tagger) {
+    tagger.isIt = false;
+    tagger.immunityRemaining = vehicleTuning.tagImmunityDuration;
+  }
+  tagged.isIt = true;
+  tagged.immunityRemaining = 0;
+  gameState.itCar = tagged;
+  gameState.tagCooldown = 0.28;
+  gameState.leaderboardDirty = true;
+  setPredictedItFromTagEvent(event);
+
+  const position = Array.isArray(event.position) && event.position.length >= 3
+    ? tmpVec3A.set(Number(event.position[0]) || 0, Number(event.position[1]) || 0, Number(event.position[2]) || 0)
+    : tmpVec3A.copy(tagged.body.position);
+  spawnTagBurst(position);
+}
+
+function handleReliableEvent(message) {
+  acknowledgeReliableEvent(message);
+  if (!rememberReliableEvent(message)) return;
+  if (message.type === "tagConfirmed") applyTagConfirmedEvent(message);
+}
+
 function selectedRoomVisibility() {
-  return roomVisibilitySelect.value === "private" ? "private" : "public";
+  return "public";
 }
 
 function currentPlayerName() {
-  return multiplayerNameInput.value.trim() || storedPlayerName;
+  return sanitizePlayerName(multiplayerNameInput.value || storedPlayerName);
 }
 
 function currentServerUrl() {
@@ -3354,6 +3439,12 @@ function recordNetworkPong(message) {
     multiplayerState.pingMs = rtt;
     multiplayerState.jitterMs = 0;
   }
+  if (Number.isFinite(message.serverTime)) {
+    const measuredOffset = message.serverTime - (sentAt + rtt * 0.5);
+    multiplayerState.serverClockOffsetMs = Number.isFinite(multiplayerState.serverClockOffsetMs)
+      ? multiplayerState.serverClockOffsetMs * 0.85 + measuredOffset * 0.15
+      : measuredOffset;
+  }
   multiplayerState.lastPongAt = performance.now();
 }
 
@@ -3363,10 +3454,24 @@ function averageSnapshotMs() {
   return intervals.reduce((sum, value) => sum + value, 0) / intervals.length;
 }
 
-function networkQualityLabel() {
+function networkQualityLabel({ snapshotHz = null, lastSnapshotAgo = null, extrapolationsPerSecond = 0 } = {}) {
   const ping = multiplayerState.pingMs;
   const jitter = multiplayerState.jitterMs;
   if (!Number.isFinite(ping)) return "Connecting";
+  if (
+    (lastSnapshotAgo !== null && lastSnapshotAgo > 650) ||
+    (snapshotHz !== null && snapshotHz < 8) ||
+    extrapolationsPerSecond > 90
+  ) {
+    return "Poor";
+  }
+  if (
+    (lastSnapshotAgo !== null && lastSnapshotAgo > 260) ||
+    (snapshotHz !== null && snapshotHz < 18) ||
+    extrapolationsPerSecond > 30
+  ) {
+    return "Fair";
+  }
   if (ping <= 80 && jitter <= 20) return "Good";
   if (ping <= 140 && jitter <= 45) return "Fair";
   return "Poor";
@@ -3383,13 +3488,27 @@ function updateNetworkUi() {
   const avgSnapshot = averageSnapshotMs();
   const snapshotHz = avgSnapshot ? 1000 / avgSnapshot : null;
   const lastSnapshotAgo = multiplayerState.lastSnapshotAt ? performance.now() - multiplayerState.lastSnapshotAt : null;
+  const remoteStats = multiplayerState.remoteInterpolationStats;
+  const now = performance.now();
+  if (!remoteStats.lastUiSampleAt) remoteStats.lastUiSampleAt = now;
+  const uiSampleSeconds = Math.max(0.001, (now - remoteStats.lastUiSampleAt) / 1000);
+  remoteStats.extrapolationsPerSecond =
+    (remoteStats.extrapolations - remoteStats.lastUiExtrapolations) / uiSampleSeconds;
+  remoteStats.lastUiSampleAt = now;
+  remoteStats.lastUiExtrapolations = remoteStats.extrapolations;
+  const avgRemoteBuffer = remoteStats.bufferSampleCount
+    ? remoteStats.bufferSamples / remoteStats.bufferSampleCount
+    : 0;
   pauseNetworkMetricsEl.innerHTML = `
-    <span>Quality</span><strong>${networkQualityLabel()}</strong>
+    <span>Quality</span><strong>${networkQualityLabel({ snapshotHz, lastSnapshotAgo, extrapolationsPerSecond: remoteStats.extrapolationsPerSecond })}</strong>
     <span>Ping</span><strong>${ping === null ? "--" : `${ping} ms`}</strong>
     <span>Jitter</span><strong>${Number.isFinite(multiplayerState.jitterMs) ? `${Math.round(multiplayerState.jitterMs)} ms` : "--"}</strong>
     <span>Snapshots</span><strong>${snapshotHz ? `${snapshotHz.toFixed(1)} Hz` : "--"}</strong>
     <span>Last Update</span><strong>${lastSnapshotAgo === null ? "--" : `${Math.round(lastSnapshotAgo)} ms`}</strong>
     <span>Input Ack</span><strong>${multiplayerState.acknowledgedInputSequence}</strong>
+    <span>Remote Delay</span><strong>${Math.round(remoteStats.delayMs)} ms</strong>
+    <span>Remote Buffer</span><strong>${avgRemoteBuffer.toFixed(1)}</strong>
+    <span>Extrapolations</span><strong>${Math.round(remoteStats.extrapolationsPerSecond)}/s</strong>
   `;
 }
 
@@ -3397,18 +3516,30 @@ function maxRoomsReached() {
   return multiplayerState.roomCount >= multiplayerState.maxRooms;
 }
 
+function generateClientRoomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let i = 0; i < 4; i += 1) {
+    code += alphabet[Math.floor(Math.random() * alphabet.length)];
+  }
+  return code;
+}
+
 function setCreateRoomOpen(open) {
-  multiplayerState.createRoomOpen = Boolean(open) && !maxRoomsReached() && !isInMultiplayerRoom();
+  const wasOpen = multiplayerState.createRoomOpen;
+  const nextOpen = Boolean(open) && !maxRoomsReached() && !isInMultiplayerRoom();
+  multiplayerState.createRoomOpen = nextOpen;
+  if (nextOpen && !wasOpen) {
+    createRoomCodeInput.value = generateClientRoomCode();
+  }
   updateMultiplayerControls();
 }
 
-function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selectedRoomVisibility() } = {}) {
+function joinRoomOnServer({ roomCode = "", visibility = selectedRoomVisibility() } = {}) {
   const cleanRoomCode = String(roomCode ?? "").trim().toUpperCase();
-  const roomVisibility = visibility === "private" ? "private" : "public";
+  const roomVisibility = "public";
   localStorage.setItem("carTagPlayerName", currentPlayerName());
-  localStorage.setItem("carTagRoomVisibility", roomVisibility);
   if (cleanRoomCode) localStorage.setItem("carTagRoomCode", cleanRoomCode);
-  roomVisibilitySelect.value = roomVisibility;
 
   if (!multiplayerState.connected) {
     multiplayerState.manualDisconnect = false;
@@ -3418,6 +3549,8 @@ function joinRoomOnServer({ roomCode = roomCodeInput.value, visibility = selecte
   }
 
   multiplayerState.createRoomOpen = false;
+  multiplayerState.lastResults = null;
+  renderLastResults();
   lobbyStatusEl.textContent = cleanRoomCode ? `Joining ${cleanRoomCode}...` : "Creating room...";
   sendServerMessage({
     type: "joinRoom",
@@ -3433,11 +3566,7 @@ function createRoomOnServer() {
     setCreateRoomOpen(false);
     return;
   }
-  joinRoomOnServer({ roomCode: createRoomCodeInput.value, visibility: selectedRoomVisibility() });
-}
-
-function joinCodeRoomOnServer() {
-  joinRoomOnServer({ roomCode: roomCodeInput.value, visibility: selectedRoomVisibility() });
+  joinRoomOnServer({ roomCode: createRoomCodeInput.value, visibility: "public" });
 }
 
 function leaveCurrentRoom() {
@@ -3458,7 +3587,8 @@ function leaveCurrentRoom() {
   multiplayerState.phase = "lobby";
   multiplayerState.round = null;
   multiplayerState.activeRoundId = null;
-  multiplayerState.lastConnectionOptions = { lobbyOnly: true, roomCode: "", visibility: selectedRoomVisibility() };
+  multiplayerState.lastResults = null;
+  multiplayerState.lastConnectionOptions = { lobbyOnly: true, roomCode: "", visibility: "public" };
   multiplayerState.createRoomOpen = false;
   if (gameState.phase !== "menu") returnToMenu({ notifyServer: false });
   sendServerMessage({ type: "leaveRoom" });
@@ -3533,7 +3663,6 @@ function renderRoomSummary() {
   appendRoomSummaryItem("Players", `${playerCount}/${maxPlayers}`);
   appendRoomSummaryItem("State", phaseLabel);
   appendRoomSummaryItem("Round", secondsLeft);
-  appendRoomSummaryItem("Access", multiplayerState.roomVisibility === "private" ? "Private" : "Public");
 }
 
 function claimedColorNames() {
@@ -3625,15 +3754,18 @@ function sendLocalInput(force = false) {
   if (!force && !urgent && now - multiplayerState.lastInputSentAt < maxInputSendIntervalMs) return;
   multiplayerState.lastInputSentAt = now;
   multiplayerState.inputSequence += 1;
+  const sentSequence = multiplayerState.inputSequence;
   if (sharedRound?.sim && sessionId) {
-    sharedRound.sim.inputSequences.set(sessionId, multiplayerState.inputSequence);
+    sharedRound.sim.inputSequences.set(sessionId, sentSequence);
   }
-  sendServerMessage({
+  if (sendServerMessage({
     type: "input",
     roundId: multiplayerState.activeRoundId,
-    sequence: multiplayerState.inputSequence,
+    sequence: sentSequence,
     input: inputSnapshot,
-  });
+  })) {
+    recordPredictionInputSample(sentSequence, inputSnapshot, sharedRound?.clientTickNow ?? sharedRound?.sim?.lastTick ?? Date.now());
+  }
 }
 
 function makePredictedRound(round) {
@@ -3750,21 +3882,23 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     snapshot.simLastTick ?? snapshot.serverTime ?? Date.now(),
   );
   for (const carSnapshot of snapshot.cars) {
-    setPredictedCarFromSnapshot(carSnapshot, { soft: false });
+    setPredictedCarFromSnapshot(carSnapshot, { soft: carSnapshot.sessionId === sessionId });
   }
   predictedRound.sim.lastTick = baseTickNow;
   predictedRound.sim.accumulator = Math.max(0, Math.min(fixedStep, snapshot.simAccumulator ?? 0));
   predictedRound.clientTickNow = baseTickNow;
 
   const replaySamples = multiplayerState.predictionInputHistory
-    .filter((sample) => sample.tickNow > baseTickNow)
-    .sort((a, b) => a.tickNow - b.tickNow);
+    .filter((sample) => sample.sequence > multiplayerState.acknowledgedInputSequence)
+    .sort((a, b) => a.sequence - b.sequence);
 
+  let replayTickNow = baseTickNow;
   for (const sample of replaySamples) {
     predictedRound.sim.inputs.set(sessionId, sample.input);
     predictedRound.sim.inputSequences.set(sessionId, sample.sequence);
-    tickSharedCannonSim(predictedRound, sample.tickNow);
-    predictedRound.clientTickNow = sample.tickNow;
+    replayTickNow = Math.max(replayTickNow + fixedStep * 1000, sample.tickNow);
+    tickSharedCannonSim(predictedRound, replayTickNow);
+    predictedRound.clientTickNow = replayTickNow;
   }
 
   for (const carSnapshot of snapshot.cars) {
@@ -3808,7 +3942,6 @@ function updateSharedCannonPrediction() {
   if (!sessionId) return;
   const now = Date.now();
   const tickNow = nextSharedCannonClientTickNow(sharedRound);
-  recordPredictionInputSample(sharedRound, sessionId, tickNow);
   tickSharedCannonSim(sharedRound, tickNow);
   const snapshot = makeSharedCannonSnapshot(multiplayerState.roomCode ?? "LOCAL", sharedRound, now);
   if (!snapshot) return;
@@ -3843,23 +3976,37 @@ function resetNetworkCars() {
     car.isNetworkControlled = false;
     car.networkKey = null;
     car.networkTarget = null;
+    car.networkSnapshots = null;
   }
   playerCar.networkKey = null;
   playerCar.networkTarget = null;
+  playerCar.networkSnapshots = null;
   gameState.networkCars = [];
   gameState.networkCarByKey.clear();
   multiplayerState.localServerSnapshot = null;
   multiplayerState.lastSnapshotAt = 0;
   multiplayerState.snapshotIntervals = [];
+  multiplayerState.serverClockOffsetMs = null;
   multiplayerState.acknowledgedInputSequence = 0;
   multiplayerState.inputSequence = 0;
   multiplayerState.lastInputSentAt = 0;
   multiplayerState.predictedRound = null;
   multiplayerState.predictionInputHistory = [];
+  multiplayerState.seenReliableEvents.clear();
+  multiplayerState.seenReliableEventOrder = [];
   multiplayerState.predictionStats.rebuilds = 0;
   multiplayerState.predictionStats.maxCorrection = 0;
   multiplayerState.predictionStats.lastCorrection = 0;
   multiplayerState.predictionStats.largeCorrections = 0;
+  multiplayerState.remoteInterpolationStats.delayMs = remoteInterpolationBaseDelayMs;
+  multiplayerState.remoteInterpolationStats.extrapolations = 0;
+  multiplayerState.remoteInterpolationStats.bufferUnderruns = 0;
+  multiplayerState.remoteInterpolationStats.bufferSamples = 0;
+  multiplayerState.remoteInterpolationStats.bufferSampleCount = 0;
+  multiplayerState.remoteInterpolationStats.maxBufferSize = 0;
+  multiplayerState.remoteInterpolationStats.lastUiExtrapolations = 0;
+  multiplayerState.remoteInterpolationStats.lastUiSampleAt = 0;
+  multiplayerState.remoteInterpolationStats.extrapolationsPerSecond = 0;
   gameState.sharedRound = null;
   gameState.sharedSessionId = "solo";
 }
@@ -3889,54 +4036,133 @@ function writeCarBodyState(car, snapshot, { snap = false } = {}) {
   car.body.interpolatedQuaternion.copy(car.body.quaternion);
 }
 
-function setNetworkCarTarget(car, snapshot) {
-  const firstTarget = !car.networkTarget;
-  car.networkTarget = {
-    position: snapshot.position,
-    velocity: snapshot.velocity,
-    angularVelocity: snapshot.angularVelocity,
-    quaternion: snapshot.quaternion,
-    receivedAt: performance.now(),
+function cloneNetworkSnapshot(snapshot, serverTime, receivedAt) {
+  return {
+    serverTime,
+    receivedAt,
+    position: [...snapshot.position],
+    velocity: [...snapshot.velocity],
+    angularVelocity: [...(snapshot.angularVelocity ?? [0, 0, 0])],
+    quaternion: [...snapshot.quaternion],
   };
+}
+
+function setNetworkCarTarget(car, snapshot, serverTime, receivedAt = performance.now()) {
+  const firstTarget = !car.networkSnapshots?.length;
+  const sample = cloneNetworkSnapshot(snapshot, serverTime, receivedAt);
+  car.networkTarget = sample;
+  car.networkSnapshots ??= [];
+  car.networkSnapshots.push(sample);
+  car.networkSnapshots.sort((a, b) => a.serverTime - b.serverTime);
+  while (car.networkSnapshots.length > remoteSnapshotBufferLimit) car.networkSnapshots.shift();
+
   const dx = snapshot.position[0] - car.body.position.x;
   const dy = snapshot.position[1] - car.body.position.y;
   const dz = snapshot.position[2] - car.body.position.z;
-  if (firstTarget || dx * dx + dy * dy + dz * dz > 225) writeCarBodyState(car, snapshot);
+  if (firstTarget || dx * dx + dy * dy + dz * dz > remoteSnapDistanceSq) writeCarBodyState(car, snapshot);
+}
+
+function currentRemoteInterpolationDelay() {
+  const jitter = Number.isFinite(multiplayerState.jitterMs) ? multiplayerState.jitterMs : 0;
+  const avgSnapshot = averageSnapshotMs();
+  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.45 : remoteInterpolationBaseDelayMs;
+  return THREE.MathUtils.clamp(
+    Math.max(remoteInterpolationBaseDelayMs, cadenceDelay) + jitter * 0.7,
+    remoteInterpolationMinDelayMs,
+    remoteInterpolationMaxDelayMs,
+  );
+}
+
+function writeInterpolatedNetworkState(car, first, second, alpha) {
+  car.body.position.set(
+    THREE.MathUtils.lerp(first.position[0], second.position[0], alpha),
+    THREE.MathUtils.lerp(first.position[1], second.position[1], alpha),
+    THREE.MathUtils.lerp(first.position[2], second.position[2], alpha),
+  );
+  car.body.velocity.set(
+    THREE.MathUtils.lerp(first.velocity[0], second.velocity[0], alpha),
+    THREE.MathUtils.lerp(first.velocity[1], second.velocity[1], alpha),
+    THREE.MathUtils.lerp(first.velocity[2], second.velocity[2], alpha),
+  );
+  car.body.angularVelocity.set(
+    THREE.MathUtils.lerp(first.angularVelocity[0], second.angularVelocity[0], alpha),
+    THREE.MathUtils.lerp(first.angularVelocity[1], second.angularVelocity[1], alpha),
+    THREE.MathUtils.lerp(first.angularVelocity[2], second.angularVelocity[2], alpha),
+  );
+  networkCurrentQuat.set(first.quaternion[0], first.quaternion[1], first.quaternion[2], first.quaternion[3]).normalize();
+  networkTargetQuat.set(second.quaternion[0], second.quaternion[1], second.quaternion[2], second.quaternion[3]).normalize();
+  networkSmoothedQuat.copy(networkCurrentQuat).slerp(networkTargetQuat, alpha);
+  car.body.quaternion.set(
+    networkSmoothedQuat.x,
+    networkSmoothedQuat.y,
+    networkSmoothedQuat.z,
+    networkSmoothedQuat.w,
+  );
+}
+
+function writeExtrapolatedNetworkState(car, sample, elapsedMs) {
+  const seconds = Math.min(remoteInterpolationMaxExtrapolateMs, Math.max(0, elapsedMs)) / 1000;
+  car.body.position.set(
+    sample.position[0] + sample.velocity[0] * seconds,
+    sample.position[1] + sample.velocity[1] * seconds,
+    sample.position[2] + sample.velocity[2] * seconds,
+  );
+  car.body.velocity.set(sample.velocity[0], sample.velocity[1], sample.velocity[2]);
+  car.body.angularVelocity.set(sample.angularVelocity[0], sample.angularVelocity[1], sample.angularVelocity[2]);
+  car.body.quaternion.set(sample.quaternion[0], sample.quaternion[1], sample.quaternion[2], sample.quaternion[3]);
+}
+
+function finalizeNetworkControlledBody(car) {
+  car.body.force.set(0, 0, 0);
+  car.body.torque.set(0, 0, 0);
+  car.body.interpolatedPosition.copy(car.body.position);
+  car.body.interpolatedQuaternion.copy(car.body.quaternion);
+  clearVehicleInputs(car);
 }
 
 function updateNetworkControlledCars(dt) {
-  const alpha = 1 - Math.exp(-dt * 16);
+  const delayMs = currentRemoteInterpolationDelay();
+  const estimatedServerTime = Number.isFinite(multiplayerState.serverClockOffsetMs)
+    ? performance.now() + multiplayerState.serverClockOffsetMs
+    : null;
+  const renderServerTime = estimatedServerTime === null ? null : estimatedServerTime - delayMs;
+  multiplayerState.remoteInterpolationStats.delayMs = delayMs;
+
   for (const car of gameState.networkCars) {
-    const target = car.networkTarget;
-    if (!target) continue;
+    const buffer = car.networkSnapshots;
+    if (!buffer?.length) continue;
     car.body.previousPosition.copy(car.body.position);
     car.body.previousQuaternion.copy(car.body.quaternion);
-    car.body.position.x += (target.position[0] - car.body.position.x) * alpha;
-    car.body.position.y += (target.position[1] - car.body.position.y) * alpha;
-    car.body.position.z += (target.position[2] - car.body.position.z) * alpha;
-    car.body.velocity.set(target.velocity[0], target.velocity[1], target.velocity[2]);
-    if (target.angularVelocity) {
-      car.body.angularVelocity.set(target.angularVelocity[0], target.angularVelocity[1], target.angularVelocity[2]);
-    }
-    networkCurrentQuat
-      .set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w)
-      .normalize();
-    networkTargetQuat
-      .set(target.quaternion[0], target.quaternion[1], target.quaternion[2], target.quaternion[3])
-      .normalize();
-    networkSmoothedQuat.copy(networkCurrentQuat).slerp(networkTargetQuat, alpha);
-    car.body.quaternion.set(
-      networkSmoothedQuat.x,
-      networkSmoothedQuat.y,
-      networkSmoothedQuat.z,
-      networkSmoothedQuat.w,
+
+    multiplayerState.remoteInterpolationStats.bufferSamples += buffer.length;
+    multiplayerState.remoteInterpolationStats.bufferSampleCount += 1;
+    multiplayerState.remoteInterpolationStats.maxBufferSize = Math.max(
+      multiplayerState.remoteInterpolationStats.maxBufferSize,
+      buffer.length,
     );
-    if (!target.angularVelocity) car.body.angularVelocity.set(0, 0, 0);
-    car.body.force.set(0, 0, 0);
-    car.body.torque.set(0, 0, 0);
-    car.body.interpolatedPosition.copy(car.body.position);
-    car.body.interpolatedQuaternion.copy(car.body.quaternion);
-    clearVehicleInputs(car);
+
+    if (renderServerTime === null) {
+      writeExtrapolatedNetworkState(car, buffer[buffer.length - 1], 0);
+      finalizeNetworkControlledBody(car);
+      continue;
+    }
+
+    while (buffer.length >= 2 && buffer[1].serverTime <= renderServerTime) buffer.shift();
+    const first = buffer[0];
+    const second = buffer[1] ?? null;
+    if (second && first.serverTime <= renderServerTime) {
+      const duration = Math.max(1, second.serverTime - first.serverTime);
+      writeInterpolatedNetworkState(car, first, second, THREE.MathUtils.clamp((renderServerTime - first.serverTime) / duration, 0, 1));
+    } else {
+      const sample = second && renderServerTime < first.serverTime ? first : buffer[buffer.length - 1];
+      const extrapolateMs = renderServerTime - sample.serverTime;
+      if (extrapolateMs > 0) {
+        multiplayerState.remoteInterpolationStats.extrapolations += 1;
+        if (extrapolateMs > remoteInterpolationMaxExtrapolateMs) multiplayerState.remoteInterpolationStats.bufferUnderruns += 1;
+      }
+      writeExtrapolatedNetworkState(car, sample, extrapolateMs);
+    }
+    finalizeNetworkControlledBody(car);
   }
 }
 
@@ -3964,6 +4190,9 @@ function reconcileLocalPlayer(dt) {
 function applyServerSnapshot(snapshot) {
   if (!snapshot || snapshot.roundId !== multiplayerState.activeRoundId) return;
   const receivedAt = performance.now();
+  if (Number.isFinite(snapshot.serverTime) && !Number.isFinite(multiplayerState.serverClockOffsetMs)) {
+    multiplayerState.serverClockOffsetMs = snapshot.serverTime - receivedAt;
+  }
   if (multiplayerState.lastSnapshotAt) {
     multiplayerState.snapshotIntervals.push(receivedAt - multiplayerState.lastSnapshotAt);
     if (multiplayerState.snapshotIntervals.length > 30) multiplayerState.snapshotIntervals.shift();
@@ -3991,13 +4220,13 @@ function applyServerSnapshot(snapshot) {
       );
       sawLocalSnapshot = true;
     } else {
-      setNetworkCarTarget(car, carSnapshot);
+      setNetworkCarTarget(car, carSnapshot, snapshot.serverTime ?? Date.now(), receivedAt);
     }
   }
   if (sawLocalSnapshot) {
     rebuildPredictionFromServerSnapshot(snapshot);
     multiplayerState.predictionInputHistory = multiplayerState.predictionInputHistory.filter(
-      (sample) => sample.tickNow > (snapshot.serverTime ?? 0),
+      (sample) => sample.sequence > multiplayerState.acknowledgedInputSequence,
     );
   }
   if (gameState.itCar !== itCar) {
@@ -4042,27 +4271,22 @@ function updateMultiplayerControls() {
     connectionPillEl.textContent = stateLabel;
     multiplayerTitleEl.textContent = browsingRooms ? "Online Play" : `Room ${multiplayerState.roomCode}`;
     multiplayerSubtitleEl.textContent = browsingRooms
-      ? roomsFull ? `${multiplayerState.maxRooms} rooms live` : "Private codes and public rooms"
+      ? roomsFull ? `${multiplayerState.maxRooms} rooms live` : "Join a public room or create one"
       : inRound
         ? selfInRound ? "Round live" : "Next round"
         : isRoomController() ? "Host controls" : "Lobby";
   }
 
   nameFieldEl.classList.toggle("hidden", inRoom);
-  roomCodeFieldEl.classList.toggle("hidden", inRoom);
   connectServerButton.classList.toggle("hidden", !inRoom);
   connectServerButton.classList.toggle("connected", inRoom);
   connectServerButton.textContent = "Leave Room";
-  roomCodeInput.disabled = inRoom;
-  roomVisibilitySelect.disabled = !multiplayerState.connected || inRoom;
   createRoomOpenButton.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
   createRoomOpenButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || roomsFull;
   createRoomOpenButton.textContent = roomsFull ? `${multiplayerState.maxRooms} Rooms Live` : "Create Room";
   createRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom || roomsFull;
   createRoomPanelEl.classList.toggle("hidden", inRoom || !multiplayerState.createRoomOpen);
-  privateRoomSectionEl.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
   publicRoomSectionEl.classList.toggle("hidden", inRoom || multiplayerState.createRoomOpen);
-  joinRoomButton.disabled = !multiplayerEnabled() || !multiplayerState.connected || inRoom || !roomCodeInput.value.trim();
   refreshRoomsButton.disabled = !multiplayerEnabled() || !multiplayerState.connected;
   roomBrowserEl.classList.toggle("hidden", inRoom);
   roomSummaryEl.classList.toggle("hidden", !inRoom);
@@ -4108,6 +4332,7 @@ function renderMultiplayerLobby() {
     lobbyStatusEl.textContent = "Connecting...";
     lobbyListEl.innerHTML = "";
     roomSummaryEl.innerHTML = "";
+    renderLastResults();
     renderRoomBrowser();
     updateMultiplayerControls();
     return;
@@ -4118,6 +4343,7 @@ function renderMultiplayerLobby() {
       : "Choose a room";
     lobbyListEl.innerHTML = "";
     roomSummaryEl.innerHTML = "";
+    renderLastResults();
     renderRoomBrowser();
     updateMultiplayerControls();
     return;
@@ -4157,12 +4383,15 @@ function renderMultiplayerLobby() {
     row.append(chip, name, role);
     lobbyListEl.append(row);
   }
+  renderLastResults();
   renderRoomBrowser();
   updateMultiplayerControls();
 }
 
 function startServerRound(round) {
   if (!round || multiplayerState.activeRoundId === round.id) return;
+  multiplayerState.lastResults = null;
+  renderLastResults();
   const localSlot = round.slots.find(
     (slot) => slot.clientId === multiplayerState.selfId || slot.sessionId === multiplayerState.sessionId,
   );
@@ -4174,6 +4403,7 @@ function startServerRound(round) {
   }
 
   multiplayerState.activeRoundId = round.id;
+  const skipCountdown = Date.now() >= round.playStartsAt;
   startRound({
     roundTime: round.settings.roundTime,
     playerCount: round.settings.carCount,
@@ -4182,6 +4412,7 @@ function startServerRound(round) {
     slots: round.slots,
     localClientId: multiplayerState.selfId,
     localSessionId: multiplayerState.sessionId,
+    skipCountdown,
   });
   multiplayerState.predictedRound = makePredictedRound(round);
 }
@@ -4200,16 +4431,13 @@ function applyServerState(state) {
   multiplayerState.settings = state.settings ?? multiplayerState.settings;
   multiplayerState.round = state.round;
   if (multiplayerState.roomCode) {
-    roomCodeInput.value = multiplayerState.roomCode;
     localStorage.setItem("carTagRoomCode", multiplayerState.roomCode);
     multiplayerState.lastConnectionOptions = {
       lobbyOnly: false,
       roomCode: multiplayerState.roomCode,
-      visibility: multiplayerState.roomVisibility,
+      visibility: "public",
     };
   }
-  roomVisibilitySelect.value = multiplayerState.roomVisibility;
-  localStorage.setItem("carTagRoomVisibility", multiplayerState.roomVisibility);
   applySettingsToControls(multiplayerState.settings);
 
   const selfClient = getSelfClient();
@@ -4236,11 +4464,10 @@ function connectMultiplayer(options = {}) {
   const url = currentServerUrl();
   const name = currentPlayerName();
   const lobbyOnly = Boolean(options.lobbyOnly);
-  const roomCode = lobbyOnly ? "" : (options.roomCode ?? roomCodeInput.value.trim().toUpperCase());
-  const visibility = options.visibility ?? selectedRoomVisibility();
+  const roomCode = lobbyOnly ? "" : String(options.roomCode ?? "").trim().toUpperCase();
+  const visibility = "public";
   multiplayerState.lastConnectionOptions = { lobbyOnly, roomCode, visibility };
   localStorage.setItem("carTagPlayerName", name);
-  localStorage.setItem("carTagRoomVisibility", visibility);
   if (roomCode) localStorage.setItem("carTagRoomCode", roomCode);
   if (lobbyOnly) {
     multiplayerState.roomCode = "";
@@ -4293,12 +4520,11 @@ function connectMultiplayer(options = {}) {
       }
       if (message.roomCode) {
         multiplayerState.roomCode = message.roomCode;
-        roomCodeInput.value = message.roomCode;
         localStorage.setItem("carTagRoomCode", message.roomCode);
         multiplayerState.lastConnectionOptions = {
           lobbyOnly: false,
           roomCode: message.roomCode,
-          visibility: multiplayerState.roomVisibility,
+          visibility: "public",
         };
       }
       return;
@@ -4336,17 +4562,26 @@ function connectMultiplayer(options = {}) {
       startServerRound(message.round);
       return;
     }
+    if (message.type === "tagConfirmed") {
+      handleReliableEvent(message);
+      return;
+    }
     if (message.type === "snapshot") {
       applyServerSnapshot(message);
       return;
     }
     if (message.type === "roundEnded") {
       if (message.snapshot) applyServerSnapshot(message.snapshot);
+      multiplayerState.lastResults = {
+        roundId: message.roundId,
+        reason: message.reason,
+        results: message.results ?? [],
+      };
       multiplayerState.activeRoundId = null;
       multiplayerState.round = null;
       multiplayerState.phase = "lobby";
       if (gameState.phase !== "menu") {
-        endRound({ autoReturnToLobby: true });
+        endRound({ autoReturnToLobby: true, results: multiplayerState.lastResults.results });
       }
       renderMultiplayerLobby();
     }
@@ -4391,6 +4626,7 @@ function disconnectMultiplayer() {
   multiplayerState.lastConnectionOptions = null;
   multiplayerState.round = null;
   multiplayerState.activeRoundId = null;
+  multiplayerState.lastResults = null;
   multiplayerState.createRoomOpen = false;
   renderColorPicker();
   renderMultiplayerLobby();
@@ -4412,14 +4648,19 @@ function renderColorPicker() {
   const takenColors = claimedColorNames();
   for (const color of carPalette) {
     const taken = takenColors.has(color.name);
+    if (taken) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "color-swatch color-swatch-placeholder";
+      placeholder.setAttribute("aria-hidden", "true");
+      colorPickerEl.append(placeholder);
+      continue;
+    }
     const button = document.createElement("button");
-    button.className = `color-swatch${color === gameState.selectedColor ? " selected" : ""}${taken ? " taken" : ""}`;
+    button.className = `color-swatch${color === gameState.selectedColor ? " selected" : ""}`;
     button.type = "button";
-    button.disabled = taken;
     button.style.setProperty("--swatch", color.css);
-    button.title = taken ? `${color.name} is taken` : color.name;
+    button.title = color.name;
     button.addEventListener("click", () => {
-      if (taken) return;
       if (multiplayerEnabled() && multiplayerState.connected) {
         sendServerMessage({ type: "setColor", color: color.name });
         return;
@@ -4924,13 +5165,22 @@ function updateChasePressureHud(state = chasePressureState()) {
   }
 }
 
+function updateLeaderboardVisibility() {
+  leaderboardEl.classList.toggle("hidden", !gameState.leaderboardVisible);
+  leaderboardToggleButton.textContent = gameState.leaderboardVisible ? "Hide Leaderboard" : "Show Leaderboard";
+  leaderboardToggleButton.setAttribute("aria-pressed", String(gameState.leaderboardVisible));
+}
+
 function updateLeaderboard() {
+  updateLeaderboardVisibility();
   const timerText = formatTime(gameState.timeRemaining);
   if (hudCache.timerText !== timerText) {
     hudCache.timerText = timerText;
     roundTimerEl.textContent = timerText;
   }
-  const itText = gameState.itCar ? `${gameState.itCar.color.name} is it` : "TAG";
+  const itText = gameState.itCar
+    ? (gameState.itCar === playerCar ? "YOU ARE IT" : `${gameState.itCar.color.name} is it`)
+    : "TAG";
   const itBackground = gameState.itCar ? gameState.itCar.color.css : "rgba(255, 75, 31, 0.86)";
   if (hudCache.itText !== itText) {
     hudCache.itText = itText;
@@ -4946,12 +5196,21 @@ function updateLeaderboard() {
   gameState.lastLeaderboardRender = now;
   gameState.leaderboardDirty = false;
   const sorted = [...gameState.cars].sort((a, b) => b.score - a.score);
+  const showNames = multiplayerEnabled() && multiplayerState.clients.length > 1;
   leaderboardEl.innerHTML = "";
   for (const car of sorted) {
     const row = document.createElement("div");
     row.className = `leader-row${car.isIt ? " it" : ""}${car.immunityRemaining > 0 ? " immune" : ""}`;
     row.style.setProperty("--car-color", car.color.css);
-    row.innerHTML = `<span class="leader-color"></span><strong>${Math.floor(car.score)}</strong>`;
+    const chip = document.createElement("span");
+    chip.className = "leader-color";
+    const name = document.createElement("span");
+    name.className = "leader-name";
+    name.textContent = car.name && car.name !== car.color.name ? car.name : car.color.name;
+    const score = document.createElement("strong");
+    score.textContent = String(Math.floor(car.score));
+    if (showNames) row.append(chip, name, score);
+    else row.append(chip, score);
     leaderboardEl.append(row);
   }
 }
@@ -4979,8 +5238,24 @@ function rankedRoundResults(cars) {
   });
 }
 
-function renderResultRows(results) {
-  resultsListEl.innerHTML = "";
+function resultNameForDisplay(result) {
+  const car = result.car ?? null;
+  const color = car?.color ?? getColorByName(result.color);
+  const name = String(car?.name ?? result.name ?? "").trim();
+  if (name && name !== color.name) return name;
+  return color.name;
+}
+
+function resultSubtitleForDisplay(result) {
+  const car = result.car ?? null;
+  const color = car?.color ?? getColorByName(result.color);
+  const name = String(car?.name ?? result.name ?? "").trim();
+  if (name && name !== color.name) return color.name;
+  return "";
+}
+
+function appendResultRows(container, results) {
+  container.innerHTML = "";
   for (const result of results) {
     const car = result.car ?? null;
     const color = car?.color ?? getColorByName(result.color);
@@ -4989,23 +5264,67 @@ function renderResultRows(results) {
     const score = Number.isFinite(result.score)
       ? result.score
       : Math.floor((Number(result.scoreMs) || 0) / 1000);
+    const subtitle = resultSubtitleForDisplay(result);
     const item = document.createElement("li");
     item.className = `result-row${result.rank === 1 ? " winner" : ""}${isPlayer ? " player" : ""}`;
     item.style.setProperty("--car-color", color.css);
-    item.innerHTML = `
-      <span class="result-rank">${result.rank}</span>
-      <span class="result-chip"></span>
-      <span class="result-name">
-        <strong>${car?.color?.name ?? result.name ?? color.name}</strong>
-        ${isPlayer ? '<em>You</em>' : ""}
-      </span>
-      <span class="result-score">
-        <strong>${score}</strong>
-        <small>sec</small>
-      </span>
-    `;
-    resultsListEl.append(item);
+    const rank = document.createElement("span");
+    rank.className = "result-rank";
+    rank.textContent = String(result.rank);
+    const chip = document.createElement("span");
+    chip.className = "result-chip";
+    const name = document.createElement("span");
+    name.className = "result-name";
+    const nameText = document.createElement("strong");
+    nameText.textContent = resultNameForDisplay(result);
+    name.append(nameText);
+    if (subtitle) {
+      const colorText = document.createElement("small");
+      colorText.textContent = subtitle;
+      name.append(colorText);
+    }
+    if (isPlayer) {
+      const self = document.createElement("em");
+      self.textContent = "You";
+      name.append(self);
+    }
+    const scoreBox = document.createElement("span");
+    scoreBox.className = "result-score";
+    const scoreText = document.createElement("strong");
+    scoreText.textContent = String(score);
+    const scoreUnit = document.createElement("small");
+    scoreUnit.textContent = "sec";
+    scoreBox.append(scoreText, scoreUnit);
+    item.append(rank, chip, name, scoreBox);
+    container.append(item);
   }
+}
+
+function renderResultRows(results) {
+  appendResultRows(resultsListEl, results);
+}
+
+function renderLastResults() {
+  if (!lastResultsEl) return;
+  const results = multiplayerState.lastResults?.results;
+  if (!multiplayerEnabled() || !isInMultiplayerRoom() || !Array.isArray(results) || results.length === 0) {
+    lastResultsEl.classList.add("hidden");
+    lastResultsEl.innerHTML = "";
+    return;
+  }
+  lastResultsEl.classList.remove("hidden");
+  lastResultsEl.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "last-results-head";
+  const title = document.createElement("strong");
+  title.textContent = "Last Round";
+  const reason = document.createElement("span");
+  reason.textContent = multiplayerState.lastResults.reason === "timer" ? "Final" : multiplayerState.lastResults.reason ?? "Final";
+  head.append(title, reason);
+  const list = document.createElement("ol");
+  list.className = "results-list last-results-list";
+  appendResultRows(list, results);
+  lastResultsEl.append(head, list);
 }
 
 function startRound(options = {}) {
@@ -5019,6 +5338,7 @@ function startRound(options = {}) {
   const arenaId = options.arena ?? arenaSelect.value;
   const localSessionId = options.localSessionId ?? "solo";
   const localClientId = options.localClientId ?? "solo";
+  const skipCountdown = Boolean(options.skipCountdown);
   const slots = serverSlots ?? (() => {
     const availableColors = shuffle(carPalette.filter((color) => color !== playerColor));
     return [
@@ -5089,12 +5409,18 @@ function startRound(options = {}) {
     applySharedCannonSnapshotToVisuals(makeSharedCannonSnapshot("LOCAL", gameState.sharedRound, Date.now()), { snap: true });
   }
   gameState.tagCooldown = 0;
-  gameState.countdownRemaining = gameState.countdownDuration;
+  gameState.countdownRemaining = skipCountdown ? 0 : gameState.countdownDuration;
   gameState.countdownText = "";
-  setCountdownText("3");
-  countdownEl.classList.remove("hidden");
-  gameState.phase = "countdown";
-  setUiPhase("countdown");
+  if (skipCountdown) {
+    countdownEl.classList.add("hidden");
+    gameState.phase = "playing";
+    setUiPhase("playing");
+  } else {
+    setCountdownText("3");
+    countdownEl.classList.remove("hidden");
+    gameState.phase = "countdown";
+    setUiPhase("countdown");
+  }
   gameState.leaderboardDirty = true;
   accumulator = 0;
   lastTime = performance.now();
@@ -5846,6 +6172,12 @@ window.__arenaCarDebug = {
         acknowledgedInputSequence: multiplayerState.acknowledgedInputSequence,
         sentInputSequence: multiplayerState.inputSequence,
         predictionStats: { ...multiplayerState.predictionStats },
+        remoteInterpolationStats: {
+          ...multiplayerState.remoteInterpolationStats,
+          avgBufferSize: multiplayerState.remoteInterpolationStats.bufferSampleCount
+            ? multiplayerState.remoteInterpolationStats.bufferSamples / multiplayerState.remoteInterpolationStats.bufferSampleCount
+            : 0,
+        },
       },
       touchInput: { throttle: touchInput.throttle, steer: touchInput.steer, jumpQueued: input.jumpQueued },
       wheelsOnGround: playerCar.vehicle.numWheelsOnGround,
@@ -5969,7 +6301,6 @@ connectServerButton.addEventListener("click", leaveCurrentRoom);
 createRoomOpenButton.addEventListener("click", () => setCreateRoomOpen(true));
 createRoomButton.addEventListener("click", createRoomOnServer);
 createRoomCancelButton.addEventListener("click", () => setCreateRoomOpen(false));
-joinRoomButton.addEventListener("click", joinCodeRoomOnServer);
 refreshRoomsButton.addEventListener("click", () => requestRoomList({ force: true }));
 multiplayerNameInput.addEventListener("change", () => {
   const name = currentPlayerName();
@@ -5977,32 +6308,16 @@ multiplayerNameInput.addEventListener("change", () => {
   localStorage.setItem("carTagPlayerName", name);
   if (isInMultiplayerRoom()) sendServerMessage({ type: "setName", name });
 });
-roomCodeInput.addEventListener("input", () => {
-  roomCodeInput.value = roomCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-  updateMultiplayerControls();
-});
-roomCodeInput.addEventListener("change", () => {
-  const roomCode = roomCodeInput.value.trim().toUpperCase();
-  if (roomCode) {
-    localStorage.setItem("carTagRoomCode", roomCode);
-  } else {
-    localStorage.removeItem("carTagRoomCode");
-  }
-});
 createRoomCodeInput.addEventListener("input", () => {
   createRoomCodeInput.value = createRoomCodeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
-});
-roomVisibilitySelect.addEventListener("change", () => {
-  const visibility = selectedRoomVisibility();
-  multiplayerState.roomVisibility = visibility;
-  localStorage.setItem("carTagRoomVisibility", visibility);
-  if (isRoomController() && multiplayerState.phase === "lobby") {
-    sendServerMessage({ type: "setRoomVisibility", visibility });
-  }
 });
 startRoundButton.addEventListener("click", requestRoundStart);
 playAgainButton.addEventListener("click", returnToMenu);
 menuReturnButton.addEventListener("click", openPauseMenu);
+leaderboardToggleButton.addEventListener("click", () => {
+  gameState.leaderboardVisible = !gameState.leaderboardVisible;
+  updateLeaderboardVisibility();
+});
 resumeGameButton.addEventListener("click", () => closePauseMenu());
 pauseMenuButton.addEventListener("click", () => {
   if (multiplayerEnabled()) {
