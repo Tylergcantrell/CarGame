@@ -2,6 +2,7 @@ import http from "node:http";
 import { spawn } from "node:child_process";
 
 const port = Number(process.env.CHECK_PORT ?? 8797);
+const workerPortBase = Number(process.env.CHECK_WORKER_PORT_BASE ?? 18797);
 const serverUrl = `ws://127.0.0.1:${port}`;
 
 function wait(ms) {
@@ -52,6 +53,7 @@ const server = spawn(process.execPath, ["server/game-server.mjs"], {
     ...process.env,
     HOST: "127.0.0.1",
     PORT: String(port),
+    WORKER_PORT_BASE: String(workerPortBase),
   },
 });
 

@@ -63,7 +63,10 @@ function makeClient({ roomCode, index }) {
       if (stats.lastSnapshotAt) stats.snapshotIntervals.push(now - stats.lastSnapshotAt);
       stats.lastSnapshotAt = now;
       stats.snapshots += 1;
-      const car = message.cars.find((entry) => entry.sessionId === stats.sessionId);
+      const cars = message.compact
+        ? message.cars.map((entry) => ({ sessionId: entry[12] ?? null, inputSequence: entry[11] ?? 0 }))
+        : message.cars;
+      const car = cars.find((entry) => entry.sessionId === stats.sessionId);
       if (car) stats.lastAck = Math.max(stats.lastAck, car.inputSequence ?? 0);
     } else if (message.type === "error") {
       stats.errors.push(message);
@@ -120,21 +123,21 @@ async function connectClient({ roomCode, index }) {
     client.ws.once("open", resolve);
     client.ws.once("error", reject);
   });
-  const welcome = await client.waitFor((message) => message.type === "welcome");
-  client.stats.clientId = welcome.id;
   client.ws.send(JSON.stringify({
     type: "hello",
     protocolVersion,
     name: `Stress ${roomCode}-${index}`,
     roomCode,
-    sessionId: welcome.sessionId,
+    sessionId: "",
   }));
+  const welcome = await client.waitFor((message) => message.type === "welcome");
+  client.stats.clientId = welcome.id;
   const joinedOrState = await client.waitFor((message) => (
     message.type === "joined" && message.roomCode === roomCode
   ) || (
     message.type === "state" && message.roomCode === roomCode
   ));
-  client.stats.sessionId = joinedOrState.sessionId ?? welcome.sessionId;
+  client.stats.sessionId = welcome.sessionId;
   if (joinedOrState.type !== "state") {
     await client.waitFor((message) => message.type === "state" && message.roomCode === roomCode);
   }
@@ -159,7 +162,7 @@ function sendInput(client, roundId, sequence, elapsedMs) {
 }
 
 const health = await jsonGet("/healthz");
-if (!health.ok || health.protocolVersion === 0) throw new Error("server is not healthy");
+if (!health.ok || !health.config?.protocolVersion) throw new Error("server is not healthy");
 
 const before = await jsonGet("/metrics");
 const rooms = Array.from({ length: roomCount }, (_, roomIndex) => {

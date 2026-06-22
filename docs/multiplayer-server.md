@@ -102,6 +102,9 @@ PORT=8787
 ALLOWED_ORIGINS=https://your-domain.example
 SESSION_SECRET=replace-with-at-least-32-random-bytes
 MAX_ROOMS=4
+MAX_ACTIVE_ROOMS=4
+WORKER_COUNT=4
+WORKER_PORT_BASE=8887
 MAX_CLIENTS_PER_ROOM=8
 MAX_CARS=8
 TICK_RATE=60
@@ -109,6 +112,28 @@ SNAPSHOT_RATE=30
 ```
 
 `SERVER_PROFILE=production` requires `ALLOWED_ORIGINS` and `SESSION_SECRET` by default. This is intentional: local mode can be open for same-machine testing, but the production switch should not accidentally accept WebSocket connections from arbitrary origins or forged reconnect session tokens.
+
+`npm run server`, `npm start`, and `npm run server:prod` now start the room router. The router owns the public HTTP/WebSocket port, spawns local game workers, pins each room code to one worker, and aggregates `/healthz`, `/metrics`, and public room lists. Worker mode is an internal implementation detail used only by the router.
+
+`WORKER_COUNT` defaults to available CPU parallelism. `MAX_ACTIVE_ROOMS` defaults to `WORKER_COUNT`, capped by `MAX_ROOMS`, so the default target is one active physics room per worker. Raise `MAX_ACTIVE_ROOMS` later only when the target machine can keep the desired snapshot cadence with multiple active rooms per worker. `WORKER_PORT_BASE` controls the private loopback port range used by worker processes.
+
+Current local stress measurements after compact live snapshots and the global room ticker:
+
+```text
+1 active room, 8 players, 60 Hz inputs: ~30 Hz snapshots
+2 active rooms, 8 players each, 60 Hz inputs: ~29 Hz snapshots
+8 active rooms, 6 players each, 30 Hz inputs: ~20 Hz snapshots
+4 active rooms, 4 players each through WAN proxy: ~30 Hz snapshots
+```
+
+After the router conversion on a 12-way local machine:
+
+```text
+8 active rooms, 6 players each, 30 Hz inputs: ~30 Hz client snapshots
+4 active rooms, 4 players each through WAN proxy: ~30 Hz client snapshots
+```
+
+For production, start conservative on the target instance, then raise `MAX_ROOMS`, `MAX_ACTIVE_ROOMS`, and `WORKER_COUNT` only when `/metrics` shows stable event-loop delay, sim timing, and snapshot cadence under realistic load.
 
 For a local production-profile check:
 
@@ -119,6 +144,7 @@ ALLOWED_ORIGINS=http://127.0.0.1:8787 SESSION_SECRET=local-prod-check-secret npm
 ## Current Server Guarantees
 
 - Multiple room codes.
+- Multi-process room router by default; rooms are assigned to local worker processes and stay pinned to one worker for the room lifetime.
 - Unique colors per room.
 - Controller handoff.
 - Late join lobby behavior.
@@ -126,6 +152,8 @@ ALLOWED_ORIGINS=http://127.0.0.1:8787 SESSION_SECRET=local-prod-check-secret npm
 - Server-owned round timer, scores, tags, snapshots, and input acknowledgement.
 - Confirmed tag transfers emit explicit server-authoritative `tagConfirmed` events with room event IDs, server time, sim tick, tagger/tagged car keys, contact type, and contact position.
 - Critical tag events are acknowledged by clients and resent for a bounded window; clients dedupe by event ID, while snapshots remain the durable state source.
+- Live snapshots use a compact JSON row format to avoid repeating static field names and metadata for every car on every send. Final round snapshots remain object-shaped for result/ranking compatibility.
+- Active rooms are advanced by one process-level simulation ticker instead of one timer per room, reducing callback contention when multiple rooms are live.
 - Shared Cannon simulation module used by solo play, browser multiplayer prediction, and the authoritative Node server.
 - Shared gameplay includes the Cannon world config, RaycastVehicle tuning, chassis collider shapes, arena physics bodies, boost, jump, aerial control, recovery, scoring, tag transfer, and AI via `server/shared/ai.js`.
 - Snapshot timing includes server sim tick and accumulator state so browser prediction rebuilds preserve fixed-step phase.
@@ -133,6 +161,7 @@ ALLOWED_ORIGINS=http://127.0.0.1:8787 SESSION_SECRET=local-prod-check-secret npm
 - Protocol version check on connect so stale clients are rejected instead of failing silently.
 - Message size limit, per-client rate limits, input sequence jump rejection, config validation, and rejection counters in `/metrics`.
 - Snapshot sends check WebSocket backpressure. Slow clients can skip replaceable snapshots, but reliable tag events are retried before expiry.
+- `/metrics` includes router-level aggregate counters plus per-worker event-loop delay, per-room sim timing, per-room snapshots, and per-client buffered amount/skipped snapshot counters for diagnosing hitches before they show up as player-visible warping.
 - Unexpected client socket closes auto-reconnect from the browser using the previous lobby/room intent and persistent session ID.
 - Static `dist/` serving from the same Node process.
 

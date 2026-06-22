@@ -50,20 +50,31 @@ function makeClient() {
   return { ws, waitFor };
 }
 
+function snapshotCars(message) {
+  if (!message.compact) return message.cars ?? [];
+  return (message.cars ?? []).map((entry) => ({
+    key: entry[0],
+    score: entry[5],
+    isIt: Boolean(entry[6]),
+    inputSequence: entry[11] ?? 0,
+    sessionId: entry[12] ?? null,
+  }));
+}
+
 async function connect({ name, roomCode, sessionId = "" }) {
   const client = makeClient();
   await new Promise((resolve, reject) => {
     client.ws.once("open", resolve);
     client.ws.once("error", reject);
   });
-  const welcome = await client.waitFor((message) => message.type === "welcome");
   client.ws.send(JSON.stringify({
     type: "hello",
     protocolVersion,
     name,
     roomCode,
-    sessionId: sessionId || welcome.sessionId,
+    sessionId,
   }));
+  const welcome = await client.waitFor((message) => message.type === "welcome");
   const joined = await client.waitFor((message) => message.type === "joined");
   const state = await client.waitFor((message) => message.type === "state" && message.roomCode === joined.roomCode);
   return { ...client, welcome, joined, state, sessionId: joined.sessionId };
@@ -100,7 +111,7 @@ for (let sequence = 1; sequence <= 4; sequence += 1) {
 
 const snapshot = await alice.waitFor((message) => {
   if (message.type !== "snapshot" || message.roundId !== started.round.id) return false;
-  const car = message.cars.find((entry) => entry.sessionId === alice.sessionId);
+  const car = snapshotCars(message).find((entry) => entry.sessionId === alice.sessionId);
   return car && car.inputSequence >= 4;
 });
 alice.ws.close();
@@ -113,7 +124,7 @@ const detachedState = await bob.waitFor((message) => (
 
 const reconnect = await connect({ name: "AliceAgain", roomCode: roomOne, sessionId: alice.sessionId });
 const reattachedSlot = reconnect.state.round?.slots?.find((slot) => slot.sessionId === alice.sessionId);
-const acknowledged = snapshot.cars.find((entry) => entry.sessionId === alice.sessionId).inputSequence;
+const acknowledged = snapshotCars(snapshot).find((entry) => entry.sessionId === alice.sessionId).inputSequence;
 
 const duplicateOne = await connect({ name: "DuplicateOne", roomCode: `D${roomOne.slice(1)}` });
 const duplicateTwo = await connect({ name: "DuplicateTwo", roomCode: `D${roomOne.slice(1)}`, sessionId: duplicateOne.sessionId });
@@ -145,7 +156,7 @@ const result = {
   roomOnePlayers: bob.state.clients.length,
   roomTwoPlayers: casey.state.clients.length,
   roomOneSlots: started.round.slots.length,
-  snapshotCars: snapshot.cars.length,
+  snapshotCars: snapshotCars(snapshot).length,
   acknowledged,
   disconnectedSlotStayedPlayer,
   disconnectedSlotDetached,

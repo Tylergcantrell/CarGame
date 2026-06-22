@@ -2,6 +2,7 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { createHmac, randomUUID } from "node:crypto";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import { loadServerConfig } from "./config.mjs";
@@ -63,6 +64,9 @@ const metrics = {
   simTickMsTotal: 0,
   simTickMsMax: 0,
 };
+
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
 
 const snapshotBackpressureBytes = 512 * 1024;
 const reliableBackpressureBytes = 1024 * 1024;
@@ -157,12 +161,13 @@ function secureHeaders(extra = {}) {
 
 function collectHealth() {
   const roomList = [...rooms.values()];
+  const activeRooms = roomList.filter((room) => room.activeRound).length;
   return {
     ok: true,
     uptimeSeconds: Math.round((nowMs() - serverStartedAt) / 1000),
     rooms: roomList.length,
     clients: clients.size,
-    activeRounds: roomList.filter((room) => room.activeRound).length,
+    activeRounds: activeRooms,
     config: {
       profile: config.profile,
       host: config.host,
@@ -170,6 +175,7 @@ function collectHealth() {
       protocolVersion,
       maxCars: config.maxCars,
       maxRooms: config.maxRooms,
+      maxActiveRooms: config.maxActiveRooms,
       maxClientsPerRoom: config.maxClientsPerRoom,
       tickRate: config.tickRate,
       snapshotRate: config.snapshotRate,
@@ -178,8 +184,15 @@ function collectHealth() {
 }
 
 function collectMetrics() {
+  const eventLoop = {
+    meanMs: eventLoopDelay.mean / 1e6,
+    maxMs: eventLoopDelay.max / 1e6,
+    p95Ms: eventLoopDelay.percentile(95) / 1e6,
+    p99Ms: eventLoopDelay.percentile(99) / 1e6,
+  };
   return {
     ...collectHealth(),
+    eventLoop,
     metrics: {
       ...metrics,
       simTickMsAvg: metrics.simTickMsTotal / Math.max(1, metrics.simTicks),
@@ -192,6 +205,16 @@ function collectMetrics() {
       controllerId: room.controllerId,
       roundsStarted: room.roundsStarted,
       snapshots: room.snapshots,
+      simTicks: room.simTicks,
+      simTickMsAvg: room.simTickMsTotal / Math.max(1, room.simTicks),
+      simTickMsMax: room.simTickMsMax,
+      clientsDetail: [...room.clients.values()].map((client) => ({
+        id: client.id,
+        bufferedAmount: client.ws.bufferedAmount,
+        skippedSnapshots: client.skippedSnapshots,
+        droppedMessages: client.droppedMessages,
+        pendingReliableEvents: client.pendingReliableEvents.size,
+      })),
     })),
   };
 }
@@ -206,6 +229,18 @@ const server = http.createServer((request, response) => {
   if (url.pathname === "/metrics") {
     response.writeHead(200, secureHeaders({ "content-type": "application/json; charset=utf-8" }));
     response.end(JSON.stringify(collectMetrics()));
+    return;
+  }
+  if (url.pathname === "/router-state") {
+    response.writeHead(200, secureHeaders({ "content-type": "application/json; charset=utf-8" }));
+    response.end(JSON.stringify({
+      ok: true,
+      roomCount: rooms.size,
+      maxRooms: config.maxRooms,
+      maxPlayers: config.maxClientsPerRoom,
+      activeRounds: [...rooms.values()].filter((room) => room.activeRound).length,
+      rooms: publicRoomList(),
+    }));
     return;
   }
 
@@ -263,6 +298,9 @@ function createRoom(code, visibility = "private") {
     lastActiveAt: nowMs(),
     roundsStarted: 0,
     snapshots: 0,
+    simTicks: 0,
+    simTickMsTotal: 0,
+    simTickMsMax: 0,
     nextEventId: 1,
   };
   rooms.set(code, room);
@@ -272,11 +310,11 @@ function createRoom(code, visibility = "private") {
 function destroyRoomIfEmpty(room) {
   if (!room || room.clients.size > 0) return false;
   clearTimeout(room.roundTimer);
-  clearInterval(room.simTimer);
   room.roundTimer = null;
   room.simTimer = null;
   room.activeRound = null;
   rooms.delete(room.code);
+  stopSimTimerIfIdle();
   return true;
 }
 
@@ -527,6 +565,39 @@ function publicSnapshotForClient(snapshot, client) {
   };
 }
 
+function compactSnapshotForClient(snapshot, client) {
+  if (!snapshot || !client) return snapshot;
+  return {
+    type: "snapshot",
+    roomCode: snapshot.roomCode,
+    roundId: snapshot.roundId,
+    serverTime: snapshot.serverTime,
+    simLastTick: snapshot.simLastTick,
+    simAccumulator: snapshot.simAccumulator,
+    remainingMs: snapshot.remainingMs,
+    compact: 1,
+    cars: snapshot.cars.map((car) => {
+      const entry = [
+        car.key,
+        car.position,
+        car.quaternion,
+        car.velocity,
+        car.angularVelocity,
+        car.score,
+        car.isIt ? 1 : 0,
+        car.immunityRemaining,
+        car.boostTimeRemaining,
+        car.boostCooldownRemaining,
+        car.input,
+      ];
+      if (car.sessionId === client.sessionId) {
+        entry.push(car.inputSequence, car.sessionId);
+      }
+      return entry;
+    }),
+  };
+}
+
 function rankRoundResults(round, snapshot, room) {
   const carsByKey = new Map((snapshot?.cars ?? []).map((car) => [car.key, car]));
   const entries = round.slots.map((slot, index) => {
@@ -582,7 +653,7 @@ function publicResultsForClient(results, client) {
 function broadcastSnapshot(room, snapshot) {
   for (const client of room.clients.values()) {
     flushReliableEvents(client);
-    sendSnapshot(client, publicSnapshotForClient(snapshot, client));
+    sendSnapshot(client, compactSnapshotForClient(snapshot, client));
   }
 }
 
@@ -646,6 +717,9 @@ function tickRoom(room) {
   metrics.simTicks += 1;
   metrics.simTickMsTotal += tickMs;
   metrics.simTickMsMax = Math.max(metrics.simTickMsMax, tickMs);
+  room.simTicks += 1;
+  room.simTickMsTotal += tickMs;
+  room.simTickMsMax = Math.max(room.simTickMsMax, tickMs);
   if (result.events?.length) {
     for (const event of result.events) {
       if (event.type === "tagConfirmed") metrics.tagEvents += 1;
@@ -680,7 +754,6 @@ function maybeBroadcastSnapshot(room, round, now) {
 function endRound(room, reason = "timer") {
   if (!room.activeRound) return;
   clearTimeout(room.roundTimer);
-  clearInterval(room.simTimer);
   room.roundTimer = null;
   room.simTimer = null;
   const endedRound = room.activeRound;
@@ -702,10 +775,21 @@ function endRound(room, reason = "timer") {
   });
   broadcastState(room);
   destroyRoomIfEmpty(room);
+  stopSimTimerIfIdle();
 }
 
 function startRound(room, client) {
   if (!client || client.id !== room.controllerId || room.activeRound) return;
+  const activeRounds = [...rooms.values()].filter((entry) => entry.activeRound).length;
+  if (activeRounds >= config.maxActiveRooms) {
+    send(client, {
+      type: "error",
+      code: "active_round_limit",
+      message: "All active round slots are in use. Try again after a round ends.",
+      maxActiveRooms: config.maxActiveRooms,
+    });
+    return;
+  }
   const roundSettings = normalizeSettings(room, room.settings);
   room.settings = roundSettings;
   const startedAt = nowMs();
@@ -720,9 +804,9 @@ function startRound(room, client) {
   };
   room.activeRound.sim = createSimState(room.activeRound, { now: nowMs() });
   clearTimeout(room.roundTimer);
-  clearInterval(room.simTimer);
   room.roundTimer = setTimeout(() => endRound(room, "timer"), config.countdownMs + roundSettings.roundTime * 1000 + 150);
-  room.simTimer = setInterval(() => tickRoom(room), 1000 / config.tickRate);
+  room.simTimer = null;
+  ensureSimTimer();
   room.lastActiveAt = nowMs();
   room.roundsStarted += 1;
   metrics.roundsStarted += 1;
@@ -1037,7 +1121,6 @@ wss.on("connection", (ws) => {
     pendingReliableEvents: new Map(),
   };
   clients.set(client.id, client);
-  send(client, { type: "welcome", id: client.id, sessionId: client.sessionId, protocolVersion, colors });
 
   ws.on("message", (raw) => handleMessage(client, raw));
   ws.on("pong", () => {
@@ -1052,6 +1135,29 @@ wss.on("connection", (ws) => {
 
 let heartbeatTimer = null;
 let cleanupTimer = null;
+let simTimer = null;
+
+function stopSimTimerIfIdle() {
+  if (!simTimer) return;
+  for (const room of rooms.values()) {
+    if (room.activeRound) return;
+  }
+  clearInterval(simTimer);
+  simTimer = null;
+}
+
+function tickActiveRooms() {
+  for (const room of rooms.values()) {
+    if (room.activeRound) tickRoom(room);
+  }
+  stopSimTimerIfIdle();
+}
+
+function ensureSimTimer() {
+  if (simTimer) return;
+  simTimer = setInterval(tickActiveRooms, 1000 / config.tickRate);
+  simTimer.unref();
+}
 
 function startMaintenanceTimers() {
   heartbeatTimer ??= setInterval(() => {
@@ -1091,9 +1197,9 @@ function startMaintenanceTimers() {
 function shutdown() {
   clearInterval(heartbeatTimer);
   clearInterval(cleanupTimer);
+  clearInterval(simTimer);
   for (const room of rooms.values()) {
     clearTimeout(room.roundTimer);
-    clearInterval(room.simTimer);
   }
   wss.close();
   server.close(() => process.exit(0));

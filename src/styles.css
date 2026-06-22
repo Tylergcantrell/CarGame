@@ -62,39 +62,53 @@ body {
 
 .screen-menu {
   overflow: hidden auto;
-  place-items: start center;
-  padding: 24px 0;
+  place-items: stretch center;
+  padding: clamp(14px, 2.2vh, 28px);
 }
 
 .menu-shell {
   position: relative;
   isolation: isolate;
-  width: min(760px, calc(100vw - 36px));
+  width: min(1180px, calc(100vw - 32px));
   max-width: 100%;
-  min-height: min(600px, calc(100vh - 36px));
-  align-self: start;
+  min-height: calc(100vh - clamp(28px, 4.4vh, 56px));
+  align-self: stretch;
   justify-self: center;
   display: grid;
-  grid-template-columns: 1fr;
-  grid-template-rows: auto auto;
-  gap: 18px;
-  align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: stretch;
 }
 
 .menu-copy {
   grid-column: 1;
   grid-row: 1;
-  align-self: center;
-  justify-self: center;
-  padding: 0 20px;
-  text-align: center;
+  align-self: start;
+  justify-self: stretch;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 0;
+  padding: 0 2px;
+  text-align: left;
+}
+
+.menu-copy .eyebrow {
+  order: 2;
+  margin: 0;
+  padding-bottom: 8px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .menu-copy h1 {
+  order: 1;
   margin: 0;
   color: #fff6df;
-  font-size: clamp(76px, 11vw, 132px);
-  line-height: 0.84;
+  font-size: clamp(38px, 5vw, 58px);
+  line-height: 0.9;
   font-weight: 950;
   letter-spacing: 0;
   text-transform: uppercase;
@@ -106,11 +120,18 @@ body {
 .menu-panel {
   grid-column: 1;
   grid-row: 2;
-  align-self: start;
-  justify-self: center;
-  width: min(760px, calc(100vw - 64px));
+  align-self: stretch;
+  justify-self: stretch;
+  width: 100%;
   max-width: 100%;
-  padding: 18px;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto auto auto auto auto;
+  align-content: start;
+  gap: 8px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: clamp(14px, 1.5vw, 18px);
   border: 1px solid rgba(255, 138, 42, 0.34);
   border-radius: 8px;
   background:
@@ -180,14 +201,14 @@ body[data-phase="ended"] .jump-button {
 }
 
 .brand-block {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .mode-switch {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .mode-button,
@@ -221,9 +242,9 @@ body[data-phase="ended"] .jump-button {
 
 .multiplayer-panel {
   display: grid;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 14px;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
   border: 1px solid rgba(255, 138, 42, 0.22);
   border-radius: 6px;
   background:
@@ -396,6 +417,15 @@ body[data-phase="ended"] .jump-button {
   gap: 6px;
 }
 
+.room-browser {
+  max-height: min(32vh, 300px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 3px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 138, 42, 0.66) rgba(8, 6, 5, 0.56);
+}
+
 .room-empty {
   min-height: 34px;
   display: grid;
@@ -471,7 +501,7 @@ body[data-phase="ended"] .jump-button {
 }
 
 .summary-item {
-  min-height: 44px;
+  min-height: 38px;
   display: grid;
   align-content: center;
   gap: 3px;
@@ -508,8 +538,8 @@ body[data-phase="ended"] .jump-button {
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  min-height: 34px;
-  padding: 6px 8px;
+  min-height: 30px;
+  padding: 5px 8px;
   border: 1px solid rgba(255, 138, 42, 0.16);
   border-radius: 6px;
   background: rgba(8, 6, 5, 0.46);
@@ -612,7 +642,7 @@ body[data-phase="ended"] .jump-button {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
 .menu-grid label {
@@ -627,7 +657,7 @@ body[data-phase="ended"] .jump-button {
 
 .menu-grid select {
   width: 100%;
-  min-height: 48px;
+  min-height: 42px;
   border: 1px solid rgba(255, 138, 42, 0.28);
   border-radius: 6px;
   background: rgba(8, 6, 5, 0.78);
@@ -643,8 +673,8 @@ body[data-phase="ended"] .jump-button {
 
 .color-section {
   display: grid;
-  gap: 9px;
-  margin-bottom: 16px;
+  gap: 6px;
+  margin-bottom: 8px;
   color: #b8c2b9;
   font-size: 11px;
   font-weight: 900;
@@ -654,9 +684,9 @@ body[data-phase="ended"] .jump-button {
 
 .color-picker {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 8px;
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 
 .color-section .color-picker {
@@ -664,7 +694,7 @@ body[data-phase="ended"] .jump-button {
 }
 
 .color-swatch {
-  height: 38px;
+  height: 28px;
   border: 2px solid rgba(255, 138, 42, 0.24);
   border-radius: 5px;
   background: var(--swatch);
@@ -686,7 +716,7 @@ body[data-phase="ended"] .jump-button {
 
 .primary-action {
   width: 100%;
-  min-height: 54px;
+  min-height: 46px;
   border: 1px solid rgba(255, 240, 168, 0.32);
   border-radius: 6px;
   background:
@@ -706,6 +736,37 @@ body[data-phase="ended"] .jump-button {
 
 .primary-action:active {
   transform: translateY(1px);
+}
+
+body[data-game-mode="solo"] .mode-switch {
+  margin-bottom: clamp(28px, 7vh, 76px);
+}
+
+body[data-game-mode="solo"] .menu-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+body[data-game-mode="solo"] .menu-grid {
+  margin-bottom: clamp(28px, 7vh, 76px);
+}
+
+body[data-game-mode="solo"] .menu-grid select {
+  min-height: clamp(48px, 6.6vh, 64px);
+}
+
+body[data-game-mode="solo"] .color-section {
+  margin-bottom: clamp(24px, 5.8vh, 62px);
+}
+
+body[data-game-mode="solo"] .color-swatch {
+  height: clamp(34px, 5vh, 46px);
+}
+
+body[data-game-mode="solo"] .primary-action {
+  align-self: end;
+  margin-top: auto;
+  min-height: clamp(54px, 7vh, 68px);
 }
 
 .primary-action:disabled,
@@ -1634,6 +1695,56 @@ body[data-phase="ended"] .jump-button {
 }
 
 @media (max-width: 640px) {
+  .screen-menu {
+    place-items: start center;
+    padding: 12px 0;
+  }
+
+  .menu-shell {
+    width: min(760px, calc(100vw - 24px));
+    min-height: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    gap: 12px;
+  }
+
+  .menu-copy {
+    grid-column: 1;
+    grid-row: 1;
+    padding: 0 8px;
+    display: block;
+    text-align: center;
+  }
+
+  .menu-copy h1 {
+    font-size: clamp(54px, 18vw, 82px);
+  }
+
+  .menu-panel {
+    grid-column: 1;
+    grid-row: 2;
+    width: min(760px, calc(100vw - 24px));
+    max-height: none;
+    display: block;
+    overflow: visible;
+  }
+
+  .multiplayer-panel {
+    grid-template-columns: 1fr;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .room-browser {
+    max-height: 36vh;
+  }
+
+  .connection-row,
+  .lobby-list,
+  .room-summary {
+    grid-template-columns: 1fr;
+  }
+
   .hud {
     inset: 10px 10px auto 10px;
     grid-template-columns: auto 1fr auto;
@@ -1759,6 +1870,10 @@ body[data-phase="ended"] .jump-button {
 
   .menu-grid {
     grid-template-columns: 1fr;
+  }
+
+  .color-picker {
+    grid-template-columns: repeat(4, 1fr);
   }
 }
 

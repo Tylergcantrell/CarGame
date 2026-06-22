@@ -1216,11 +1216,7 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
       const body = car.body;
       return {
         key: slot.key,
-        type: slot.type,
-        clientId: slot.clientId ?? null,
         sessionId: slot.sessionId ?? null,
-        id: slot.id ?? null,
-        color: slot.color,
         position: [body.position.x, body.position.y, body.position.z],
         quaternion: [body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w],
         velocity: [body.velocity.x, body.velocity.y, body.velocity.z],

@@ -1,3 +1,8 @@
 import { startGameServer } from "./runtime.mjs";
+import { startClusterRouter } from "./cluster-router.mjs";
 
-startGameServer();
+if (process.env.CARTAG_WORKER === "1") {
+  startGameServer();
+} else {
+  startClusterRouter();
+}

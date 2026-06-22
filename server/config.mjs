@@ -1,3 +1,5 @@
+import os from "node:os";
+
 function numberEnv(env, name, fallback, { min = -Infinity, max = Infinity, integer = false } = {}) {
   const raw = env[name];
   const parsed = raw === undefined || raw === "" ? fallback : Number(raw);
@@ -9,6 +11,15 @@ function numberEnv(env, name, fallback, { min = -Infinity, max = Infinity, integ
     throw new Error(`${name} must be between ${min} and ${max}.`);
   }
   return value;
+}
+
+function defaultActiveRooms(env, maxRooms) {
+  const availableWorkers = Math.max(1, Math.floor(os.availableParallelism?.() ?? os.cpus()?.length ?? 1));
+  const requestedWorkers = Number(env.WORKER_COUNT);
+  const workerCount = Number.isFinite(requestedWorkers) && requestedWorkers > 0
+    ? Math.floor(requestedWorkers)
+    : availableWorkers;
+  return Math.min(maxRooms, workerCount);
 }
 
 export function loadServerConfig(env = process.env) {
@@ -26,13 +37,15 @@ export function loadServerConfig(env = process.env) {
     throw new Error("SERVER_PROFILE=production requires SESSION_SECRET unless REQUIRE_SESSION_SECRET=0 is set.");
   }
 
+  const maxRooms = numberEnv(env, "MAX_ROOMS", production ? 4 : 32, { min: 1, max: 512, integer: true });
   const config = {
     profile,
     production,
     host: env.HOST ?? (production ? "0.0.0.0" : "127.0.0.1"),
     port: numberEnv(env, "PORT", 8787, { min: 1, max: 65535, integer: true }),
     maxCars: numberEnv(env, "MAX_CARS", 8, { min: 1, max: 16, integer: true }),
-    maxRooms: numberEnv(env, "MAX_ROOMS", production ? 4 : 32, { min: 1, max: 512, integer: true }),
+    maxRooms,
+    maxActiveRooms: numberEnv(env, "MAX_ACTIVE_ROOMS", defaultActiveRooms(env, maxRooms), { min: 1, max: maxRooms, integer: true }),
     maxClientsPerRoom: numberEnv(env, "MAX_CLIENTS_PER_ROOM", 8, { min: 1, max: 16, integer: true }),
     minRoundTime: numberEnv(env, "MIN_ROUND_TIME", 30, { min: 10, max: 3600, integer: true }),
     maxRoundTime: numberEnv(env, "MAX_ROUND_TIME", 600, { min: 10, max: 7200, integer: true }),

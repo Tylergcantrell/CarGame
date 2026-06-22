@@ -21,6 +21,7 @@ export const touchInput = {
 
 const keys = new Set();
 let mouseBoostHeld = false;
+let actionInputEnabled = true;
 const lastTouchCommandAt = {
   boost: -Infinity,
   jump: -Infinity,
@@ -119,11 +120,20 @@ function scheduleJoystickIdle(joystickEl) {
 function handleTouchCommand(event, command) {
   cancelTouchEvent(event);
   event.stopPropagation();
+  if (!actionInputEnabled) return;
   const now = performance.now();
   if (event.type === "click" && now - lastTouchCommandAt[command] < 650) return;
   lastTouchCommandAt[command] = now;
   if (command === "boost") input.boostQueued = true;
   if (command === "jump") input.jumpQueued = true;
+}
+
+export function setActionInputEnabled(enabled) {
+  actionInputEnabled = Boolean(enabled);
+  if (actionInputEnabled) return;
+  mouseBoostHeld = false;
+  input.boostQueued = false;
+  input.jumpQueued = false;
 }
 
 export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl, desktopCameraToggle = true }) {
@@ -151,7 +161,7 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
       event.preventDefault();
     }
 
-    if (!keys.has(code) && code === "Space") input.jumpQueued = true;
+    if (actionInputEnabled && !keys.has(code) && code === "Space") input.jumpQueued = true;
     keys.add(code);
   });
 
@@ -163,11 +173,13 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
     window.addEventListener("mousedown", (event) => {
       if (isTypingTarget(event.target) || isControlTarget(event.target) || !isGameplayMouseTarget(event.target)) return;
       if (event.button === 0) {
-        if (!mouseBoostHeld) input.boostQueued = true;
+        if (actionInputEnabled && !mouseBoostHeld) input.boostQueued = true;
         mouseBoostHeld = true;
         event.preventDefault();
-      } else if (event.button === 2) {
+      } else if (event.button === 2 && actionInputEnabled) {
         input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
+        event.preventDefault();
+      } else if (event.button === 2) {
         event.preventDefault();
       }
     });

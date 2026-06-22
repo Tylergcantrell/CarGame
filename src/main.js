@@ -11,6 +11,7 @@ import {
   input,
   installInputControls,
   keyboardAxes,
+  setActionInputEnabled,
   touchInput,
 } from "./input.js";
 import { createPhysicsWorld } from "../server/shared/physics.js";
@@ -2706,6 +2707,7 @@ function recordPerfSample(frameMs, simMs, renderMs, steps) {
 
 function setUiPhase(phase) {
   document.body.dataset.phase = phase;
+  setActionInputEnabled(phase === "playing");
 }
 
 function makeInputState() {
@@ -4202,7 +4204,25 @@ function applyServerSnapshot(snapshot) {
   let itCar = null;
   let sawLocalSnapshot = false;
   for (const car of gameState.cars) car.isIt = false;
-  for (const carSnapshot of snapshot.cars) {
+  const carSnapshots = snapshot.compact
+    ? snapshot.cars.map((entry) => ({
+      key: entry[0],
+      position: entry[1],
+      quaternion: entry[2],
+      velocity: entry[3],
+      angularVelocity: entry[4],
+      score: entry[5],
+      isIt: Boolean(entry[6]),
+      immunityRemaining: entry[7],
+      boostTimeRemaining: entry[8],
+      boostCooldownRemaining: entry[9],
+      input: entry[10],
+      inputSequence: entry[11] ?? 0,
+      sessionId: entry[12] ?? null,
+    }))
+    : snapshot.cars;
+  if (snapshot.compact) snapshot.cars = carSnapshots;
+  for (const carSnapshot of carSnapshots) {
     const car = gameState.networkCarByKey.get(carSnapshot.key);
     if (!car) continue;
     car.score = carSnapshot.score;
@@ -4246,6 +4266,7 @@ function showMultiplayerScoreboardThenLobby() {
 }
 
 function updateMultiplayerControls() {
+  document.body.dataset.gameMode = multiplayerState.mode;
   modeSoloButton.classList.toggle("active", multiplayerState.mode === "solo");
   modeMultiplayerButton.classList.toggle("active", multiplayerEnabled());
   multiplayerPanelEl.classList.toggle("hidden", !multiplayerEnabled());
@@ -4520,12 +4541,18 @@ function connectMultiplayer(options = {}) {
       }
       if (message.roomCode) {
         multiplayerState.roomCode = message.roomCode;
+        multiplayerState.phase = "lobby";
+        multiplayerState.createRoomOpen = false;
+        multiplayerState.lastResults = null;
         localStorage.setItem("carTagRoomCode", message.roomCode);
         multiplayerState.lastConnectionOptions = {
           lobbyOnly: false,
           roomCode: message.roomCode,
           visibility: "public",
         };
+        lobbyStatusEl.textContent = "Joining room...";
+        renderLastResults();
+        renderMultiplayerLobby();
       }
       return;
     }
@@ -4635,6 +4662,7 @@ function disconnectMultiplayer() {
 function setGameMode(mode) {
   closePauseMenu({ restoreSolo: false });
   multiplayerState.mode = mode;
+  document.body.dataset.gameMode = mode;
   if (mode === "solo") multiplayerState.createRoomOpen = false;
   if (mode === "solo" && multiplayerState.connected) disconnectMultiplayer();
   if (mode === "multiplayer" && !multiplayerState.connected) connectMultiplayer({ lobbyOnly: true });

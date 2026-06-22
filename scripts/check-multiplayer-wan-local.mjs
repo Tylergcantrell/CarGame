@@ -4,6 +4,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 const serverPort = Number(process.env.CHECK_WAN_SERVER_PORT ?? 8808);
 const proxyPort = Number(process.env.CHECK_WAN_PROXY_PORT ?? 8809);
+const workerPortBase = Number(process.env.CHECK_WAN_WORKER_PORT_BASE ?? 20808);
 const targetHttpUrl = `http://127.0.0.1:${serverPort}`;
 const targetWsUrl = `ws://127.0.0.1:${serverPort}`;
 const proxyServerUrl = `ws://127.0.0.1:${proxyPort}`;
@@ -168,6 +169,7 @@ const server = spawn(process.execPath, ["server/game-server.mjs"], {
     ...process.env,
     HOST: "127.0.0.1",
     PORT: String(serverPort),
+    WORKER_PORT_BASE: String(workerPortBase),
   },
 });
 
