@@ -14,8 +14,8 @@ import {
 
 export const arenaIds = Object.keys(arenaDefinitions);
 
-const fixedStep = 1 / 60;
-const maxCatchupSteps = 5;
+const fixedStep = 1 / 90;
+const maxCatchupSteps = 8;
 const collisionGroups = {
   arena: 1,
   car: 2,
@@ -36,8 +36,6 @@ const wheelTagBounds = {
   maxZ: 2.15,
 };
 const inputFreshnessTimeoutMs = 1500;
-const sweptTagSampleDistance = 0.6;
-const maxSweptTagSamples = 8;
 const boostForce = new CANNON.Vec3();
 const boostPoint = new CANNON.Vec3(0, 0, 1.2);
 const wheelTagLocalPoint = new CANNON.Vec3();
@@ -51,12 +49,6 @@ const arenaWallPoint = new THREE.Vector3();
 const contactSurfaceNormal = new THREE.Vector3();
 const rightingClearanceOffset = new THREE.Vector3();
 const rightingSampleWorld = new THREE.Vector3();
-const sweptPositionA = new THREE.Vector3();
-const sweptPositionB = new THREE.Vector3();
-const sweptQuaternionA = new THREE.Quaternion();
-const sweptQuaternionB = new THREE.Quaternion();
-const sweptWorldPoint = new THREE.Vector3();
-const sweptLocalPoint = new THREE.Vector3();
 const tmpVec3A = new THREE.Vector3();
 const tmpVec3B = new THREE.Vector3();
 const tmpVec3C = new THREE.Vector3();
@@ -76,17 +68,6 @@ const rightingClearanceSamplePoints = [
   new THREE.Vector3(1.22, 0.28, -1.36),
   new THREE.Vector3(0, 0.94, -0.28),
   new THREE.Vector3(0, 0.36, 2.12),
-];
-
-const tagBoundsCorners = [
-  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.minY, wheelTagBounds.minZ),
-  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.minY, wheelTagBounds.maxZ),
-  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.maxY, wheelTagBounds.minZ),
-  new THREE.Vector3(wheelTagBounds.minX, wheelTagBounds.maxY, wheelTagBounds.maxZ),
-  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.minY, wheelTagBounds.minZ),
-  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.minY, wheelTagBounds.maxZ),
-  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.maxY, wheelTagBounds.minZ),
-  new THREE.Vector3(wheelTagBounds.maxX, wheelTagBounds.maxY, wheelTagBounds.maxZ),
 ];
 
 function hashString(value) {
@@ -176,6 +157,7 @@ export function clampInput(input = {}) {
     boost: Boolean(input.boost),
     boostQueued: Boolean(input.boostQueued),
     jumpQueued: Boolean(input.jumpQueued),
+    airRoll: clamp(Number(input.airRoll) || 0, -1, 1),
   };
 }
 
@@ -460,6 +442,7 @@ function makeInputState() {
     boost: false,
     boostQueued: false,
     jumpQueued: false,
+    airRoll: 0,
   };
 }
 
@@ -598,12 +581,18 @@ function spawnCarAt(car, spawn) {
 function clearVehicleInputs(car) {
   car.currentSteering = 0;
   for (let i = 0; i < car.vehicle.wheelInfos.length; i += 1) {
+    car.vehicle.wheelInfos[i].frictionSlip = i < 2 ? wheelOptions.frictionSlip : rearWheelOptions.frictionSlip;
     car.vehicle.setBrake(0, i);
     car.vehicle.applyEngineForce(0, i);
     car.vehicle.setSteeringValue(0, i);
   }
 }
 
+function resetWheelGrip(car) {
+  for (let i = 0; i < car.vehicle.wheelInfos.length; i += 1) {
+    car.vehicle.wheelInfos[i].frictionSlip = i < 2 ? wheelOptions.frictionSlip : rearWheelOptions.frictionSlip;
+  }
+}
 function driveCar(car) {
   if (car.manualRightingActive) {
     clearVehicleInputs(car);
@@ -611,10 +600,11 @@ function driveCar(car) {
   }
   const speedKmh = car.vehicle.currentVehicleSpeedKmHour;
   const itBoost = car.isIt ? vehicleTuning.itSpeedMultiplier : 1;
+  resetWheelGrip(car);
   const engine =
     car.input.throttle > 0 && speedKmh < vehicleTuning.maxForwardKmh * itBoost
       ? -vehicleTuning.engineForce * itBoost
-      : car.input.throttle < 0 && speedKmh < 5
+      : car.input.throttle < 0 && speedKmh > -vehicleTuning.maxReverseKmh && speedKmh < 5
         ? vehicleTuning.reverseForce
         : 0;
   const brake = car.input.throttle < 0 && speedKmh > 5 ? vehicleTuning.brakeForce : 0;
@@ -630,7 +620,10 @@ function driveCar(car) {
   car.vehicle.applyEngineForce(engine * 0.28, 1);
   car.vehicle.applyEngineForce(engine * 0.72, 2);
   car.vehicle.applyEngineForce(engine * 0.72, 3);
-  for (let i = 0; i < 4; i += 1) car.vehicle.setBrake(brake, i);
+  car.vehicle.setBrake(brake, 0);
+  car.vehicle.setBrake(brake, 1);
+  car.vehicle.setBrake(brake, 2);
+  car.vehicle.setBrake(brake, 3);
 }
 
 function arenaContactForPoint(pos) {
@@ -903,12 +896,13 @@ function applyAirControls(car) {
 
   const pitchInput = car.input.throttle;
   const yawInput = car.input.steer;
-  if (pitchInput === 0 && yawInput === 0) return;
+  const rollInput = car.input.airRoll;
+  if (pitchInput === 0 && yawInput === 0 && rollInput === 0) return;
 
   airControlTorque.set(
     pitchInput * vehicleTuning.airPitchTorque,
     yawInput * vehicleTuning.airYawTorque,
-    0,
+    rollInput * vehicleTuning.airRollTorque,
   );
   car.body.vectorToWorldFrame(airControlTorque, worldAirControlTorque);
   car.body.torque.vadd(worldAirControlTorque, car.body.torque);
@@ -1027,13 +1021,6 @@ function playerInputIsFresh(sim, sessionId) {
   return sim.lastTick - sim.inputTimes.get(sessionId) <= inputFreshnessTimeoutMs;
 }
 
-function bodyMotionDistance(body) {
-  const dx = body.position.x - body.previousPosition.x;
-  const dy = body.position.y - body.previousPosition.y;
-  const dz = body.position.z - body.previousPosition.z;
-  return Math.hypot(dx, dy, dz);
-}
-
 function processWheelTagContacts(sim, cars) {
   if (sim.tagCooldown > 0) return false;
   for (const car of cars) updateWheelTagTransforms(car);
@@ -1054,82 +1041,6 @@ function processWheelTagContacts(sim, cars) {
         for (const wheelB of carB.vehicle.wheelInfos) {
           if (wheelCentersTouch(wheelA, wheelB)) return resolveTagPair(sim, carA, carB);
         }
-      }
-    }
-  }
-  return false;
-}
-
-function setSweptTransform(car, alpha, position, quaternion) {
-  position.set(
-    car.body.previousPosition.x + (car.body.position.x - car.body.previousPosition.x) * alpha,
-    car.body.previousPosition.y + (car.body.position.y - car.body.previousPosition.y) * alpha,
-    car.body.previousPosition.z + (car.body.position.z - car.body.previousPosition.z) * alpha,
-  );
-  quaternion
-    .set(
-      car.body.previousQuaternion.x,
-      car.body.previousQuaternion.y,
-      car.body.previousQuaternion.z,
-      car.body.previousQuaternion.w,
-    )
-    .slerp(
-      tmpQuat.set(
-        car.body.quaternion.x,
-        car.body.quaternion.y,
-        car.body.quaternion.z,
-        car.body.quaternion.w,
-      ),
-      alpha,
-    );
-}
-
-function tagBoundsContainsLocal(point) {
-  return point.x >= wheelTagBounds.minX &&
-    point.x <= wheelTagBounds.maxX &&
-    point.y >= wheelTagBounds.minY &&
-    point.y <= wheelTagBounds.maxY &&
-    point.z >= wheelTagBounds.minZ &&
-    point.z <= wheelTagBounds.maxZ;
-}
-
-function localPointToSweptWorld(localPoint, position, quaternion, out) {
-  return out.copy(localPoint).applyQuaternion(quaternion).add(position);
-}
-
-function sweptWorldPointToLocal(worldPoint, position, quaternion, out) {
-  return out.copy(worldPoint).sub(position).applyQuaternion(tmpQuatB.copy(quaternion).conjugate());
-}
-
-function tagBoundsOverlapAtAlpha(carA, carB, alpha) {
-  setSweptTransform(carA, alpha, sweptPositionA, sweptQuaternionA);
-  setSweptTransform(carB, alpha, sweptPositionB, sweptQuaternionB);
-
-  for (const corner of tagBoundsCorners) {
-    localPointToSweptWorld(corner, sweptPositionA, sweptQuaternionA, sweptWorldPoint);
-    sweptWorldPointToLocal(sweptWorldPoint, sweptPositionB, sweptQuaternionB, sweptLocalPoint);
-    if (tagBoundsContainsLocal(sweptLocalPoint)) return true;
-
-    localPointToSweptWorld(corner, sweptPositionB, sweptQuaternionB, sweptWorldPoint);
-    sweptWorldPointToLocal(sweptWorldPoint, sweptPositionA, sweptQuaternionA, sweptLocalPoint);
-    if (tagBoundsContainsLocal(sweptLocalPoint)) return true;
-  }
-  return false;
-}
-
-function processSweptTagContacts(sim, cars) {
-  if (sim.tagCooldown > 0) return false;
-  for (let i = 0; i < cars.length - 1; i += 1) {
-    for (let j = i + 1; j < cars.length; j += 1) {
-      const carA = cars[i];
-      const carB = cars[j];
-      if (!carA.isIt && !carB.isIt) continue;
-      const motionA = bodyMotionDistance(carA.body);
-      const motionB = bodyMotionDistance(carB.body);
-      const samples = Math.min(maxSweptTagSamples, Math.floor(Math.max(motionA, motionB) / sweptTagSampleDistance));
-      for (let sample = 1; sample <= samples; sample += 1) {
-        const alpha = sample / (samples + 1);
-        if (tagBoundsOverlapAtAlpha(carA, carB, alpha)) return resolveTagPair(sim, carA, carB);
       }
     }
   }
@@ -1159,7 +1070,6 @@ function processContacts(round, cars) {
     }
   }
   if (!changed) changed = processWheelTagContacts(sim, cars);
-  if (!changed) changed = processSweptTagContacts(sim, cars);
   finalizeCarSurfaceContacts(cars);
   return changed;
 }
@@ -1178,6 +1088,7 @@ function stepRound(round) {
       car.input.throttle = input.throttle;
       car.input.steer = input.steer;
       car.input.boost = input.boost;
+      car.input.airRoll = input.airRoll;
       car.input.boostQueued = car.input.boostQueued || input.boostQueued;
       car.input.jumpQueued = car.input.jumpQueued || input.jumpQueued;
       if (storedInput) {

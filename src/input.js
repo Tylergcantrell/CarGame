@@ -6,6 +6,8 @@ export const input = {
   boost: false,
   boostQueued: false,
   jumpQueued: false,
+  airRoll: 0,
+  cameraView: "normal",
 };
 
 export const touchInput = {
@@ -32,15 +34,24 @@ function isTypingTarget(target) {
     target.isContentEditable;
 }
 
+function controlCode(event) {
+  if (event.key === "Shift" && event.location === 2) return "ShiftRight";
+  if (event.key === "Shift" && event.location === 1) return "ShiftLeft";
+  return event.code;
+}
+
 export function keyboardAxes() {
   const forward = keys.has("KeyW") || keys.has("ArrowUp");
   const reverse = keys.has("KeyS") || keys.has("ArrowDown");
   const left = keys.has("KeyA") || keys.has("ArrowLeft");
   const right = keys.has("KeyD") || keys.has("ArrowRight");
+  const rollLeft = keys.has("KeyQ");
+  const rollRight = keys.has("KeyE");
   return {
     throttle: (forward ? 1 : 0) + (reverse ? -1 : 0),
     steer: (left ? 1 : 0) + (right ? -1 : 0),
-    boost: keys.has("KeyQ"),
+    boost: keys.has("ShiftLeft") || keys.has("ShiftRight"),
+    airRoll: (rollRight ? 1 : 0) + (rollLeft ? -1 : 0),
   };
 }
 
@@ -90,37 +101,44 @@ function handleTouchCommand(event, command) {
   if (command === "jump") input.jumpQueued = true;
 }
 
-export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl }) {
+export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joystickKnobEl, desktopCameraToggle = true }) {
   window.addEventListener("keydown", (event) => {
+    const code = controlCode(event);
     if (isTypingTarget(event.target)) {
-      keys.delete(event.code);
+      keys.delete(code);
       return;
     }
 
-    if (
-      [
-        "KeyW",
-        "KeyA",
-        "KeyS",
-        "KeyD",
-        "ArrowUp",
-        "ArrowLeft",
-        "ArrowDown",
-        "ArrowRight",
-        "KeyQ",
-        "Space",
-      ].includes(event.code)
-    ) {
+    const handledCodes = [
+      "KeyW",
+      "KeyA",
+      "KeyS",
+      "KeyD",
+      "ArrowUp",
+      "ArrowLeft",
+      "ArrowDown",
+      "ArrowRight",
+      "KeyQ",
+      "KeyE",
+      "ShiftLeft",
+      "ShiftRight",
+      "Space",
+    ];
+    if (desktopCameraToggle) handledCodes.push("KeyR");
+    if (handledCodes.includes(code)) {
       event.preventDefault();
     }
 
-    if (!keys.has(event.code) && event.code === "Space") input.jumpQueued = true;
-    if (!keys.has(event.code) && event.code === "KeyQ") input.boostQueued = true;
-    keys.add(event.code);
+    if (!keys.has(code) && code === "Space") input.jumpQueued = true;
+    if (!keys.has(code) && (code === "ShiftLeft" || code === "ShiftRight")) input.boostQueued = true;
+    if (!keys.has(code) && desktopCameraToggle && code === "KeyR") {
+      input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
+    }
+    keys.add(code);
   });
 
   window.addEventListener("keyup", (event) => {
-    keys.delete(event.code);
+    keys.delete(controlCode(event));
   });
 
   joystickEl.addEventListener("pointerdown", (event) => {
@@ -176,5 +194,6 @@ export function clampPlayerInput(keyboard) {
     throttle: THREE.MathUtils.clamp(keyboard.throttle + touchInput.throttle, -1, 1),
     steer: THREE.MathUtils.clamp(keyboard.steer + touchInput.steer, -1, 1),
     boost: keyboard.boost,
+    airRoll: THREE.MathUtils.clamp(keyboard.airRoll, -1, 1),
   };
 }

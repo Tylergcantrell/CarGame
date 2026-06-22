@@ -7,6 +7,8 @@ import {
 } from "../server/shared/cannon-multiplayer-sim.js";
 import { spawnHeight, wheelPositions } from "../server/shared/vehicle-config.js";
 
+const physicsStep = 1 / 90;
+
 function makeRound({ arena = "orange" } = {}) {
   return {
     id: "round-test",
@@ -61,7 +63,7 @@ assert.equal(movedPlayer.inputSequence, 7, "snapshot should acknowledge latest i
 assert(movedPlayer.position[1] > 0, "Cannon player should stay above world floor");
 assert.equal(typeof moved.simLastTick, "number", "snapshot should expose the server sim tick clock");
 assert.equal(typeof moved.simAccumulator, "number", "snapshot should expose the server fixed-step accumulator");
-assert(moved.simAccumulator >= 0 && moved.simAccumulator < 1 / 60, "snapshot accumulator should stay within one fixed step");
+assert(moved.simAccumulator >= 0 && moved.simAccumulator < physicsStep, "snapshot accumulator should stay within one fixed step");
 
 const queued = makeRound();
 queued.sim = createSimState(queued, { now: 0, rng: () => 0 });
@@ -142,26 +144,26 @@ tickSim(wheelNearMissRound, 1000 / 60);
 assert.equal(wheelNearMissTagger.isIt, true, "wheel above the car should not tag without sphere-volume overlap");
 assert.equal(wheelNearMissTarget.isIt, false, "wheel near-miss target should not become it");
 
-const sweptRound = makeRound();
-sweptRound.sim = createSimState(sweptRound, { now: 0, rng: () => 0 });
-const sweptTagger = sweptRound.sim.cars.get("player:a");
-const sweptTarget = sweptRound.sim.cars.get("player:b");
-sweptTagger.isIt = true;
-sweptTarget.isIt = false;
-sweptTagger.body.position.set(-8, spawnHeight, 0);
-sweptTagger.body.velocity.set(960, 0, 0);
-sweptTarget.body.position.set(0, spawnHeight, 0);
-sweptTarget.body.velocity.set(0, 0, 0);
-syncBodyHistory(sweptTagger);
-syncBodyHistory(sweptTarget);
-tickSim(sweptRound, 1000 / 60);
-assert.equal(sweptTarget.isIt, true, "swept tag volume overlap should transfer tag during high-speed crossing");
-assert.equal(sweptTagger.isIt, false, "swept tagger should stop being it");
+const fastPassRound = makeRound();
+fastPassRound.sim = createSimState(fastPassRound, { now: 0, rng: () => 0 });
+const fastPassTagger = fastPassRound.sim.cars.get("player:a");
+const fastPassTarget = fastPassRound.sim.cars.get("player:b");
+fastPassTagger.isIt = true;
+fastPassTarget.isIt = false;
+fastPassTagger.body.position.set(-8, spawnHeight, 0);
+fastPassTagger.body.velocity.set(960, 0, 0);
+fastPassTarget.body.position.set(0, spawnHeight, 0);
+fastPassTarget.body.velocity.set(0, 0, 0);
+syncBodyHistory(fastPassTagger);
+syncBodyHistory(fastPassTarget);
+tickSim(fastPassRound, 1000 / 60);
+assert.equal(fastPassTagger.isIt, true, "fast pass without actual contact should not transfer tag");
+assert.equal(fastPassTarget.isIt, false, "fast-pass target should not become it without contact");
 
-const sweptNearMissRound = makeRound();
-sweptNearMissRound.sim = createSimState(sweptNearMissRound, { now: 0, rng: () => 0 });
-const nearMissTagger = sweptNearMissRound.sim.cars.get("player:a");
-const nearMissTarget = sweptNearMissRound.sim.cars.get("player:b");
+const highNearMissRound = makeRound();
+highNearMissRound.sim = createSimState(highNearMissRound, { now: 0, rng: () => 0 });
+const nearMissTagger = highNearMissRound.sim.cars.get("player:a");
+const nearMissTarget = highNearMissRound.sim.cars.get("player:b");
 nearMissTagger.isIt = true;
 nearMissTarget.isIt = false;
 nearMissTagger.body.position.set(-8, spawnHeight + 5, 0);
@@ -170,8 +172,8 @@ nearMissTarget.body.position.set(0, spawnHeight, 0);
 nearMissTarget.body.velocity.set(0, 0, 0);
 syncBodyHistory(nearMissTagger);
 syncBodyHistory(nearMissTarget);
-tickSim(sweptNearMissRound, 1000 / 60);
-assert.equal(nearMissTagger.isIt, true, "swept tag should not fire on a near miss without volume overlap");
+tickSim(highNearMissRound, 1000 / 60);
+assert.equal(nearMissTagger.isIt, true, "high near miss should not tag without actual contact");
 assert.equal(nearMissTarget.isIt, false, "near-miss target should not become it");
 
 const disconnectedRound = makeRound();

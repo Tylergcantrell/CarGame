@@ -46,13 +46,14 @@ export const stabilitySamplePoints = [
 
 export const vehicleTuning = {
   engineForce: 1600,
-  reverseForce: 900,
+  reverseForce: 1600,
   brakeForce: 36,
   steerAngle: 0.43,
   highSpeedSteerScale: 0.38,
   steerResponse: 4.2,
-  airPitchTorque: 1550,
-  airYawTorque: 2100,
+  airPitchTorque: 2350,
+  airYawTorque: 3000,
+  airRollTorque: 2300,
   contactAssistSurfaceGrace: 0.12,
   surfaceStabilityDistance: 1.45,
   wheelSupportMinUpDot: 0.22,
@@ -70,6 +71,11 @@ export const vehicleTuning = {
   boostCooldown: 15,
   jumpVelocity: 11.5,
   maxForwardKmh: 96,
+  maxReverseKmh: 96,
+  chasePressureRange: 72,
+  chasePressureLockRange: 10,
+  chaseCameraMinDistance: 12.4,
+  chaseCameraMaxDistance: 21.5,
 };
 
 export const carPalette = [
