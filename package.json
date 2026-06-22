@@ -18,7 +18,8 @@
     "stress:multiplayer": "node scripts/stress-multiplayer.mjs",
     "check:multiplayer": "node scripts/check-multiplayer-local.mjs",
     "check:stress": "node scripts/check-multiplayer-stress-local.mjs",
-    "check:wan": "node scripts/check-multiplayer-wan-local.mjs"
+    "check:wan": "node scripts/check-multiplayer-wan-local.mjs",
+    "check:jitter": "node scripts/check-client-jitter.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

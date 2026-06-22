@@ -82,6 +82,11 @@ const visualCorrectionInverseQuat = new THREE.Quaternion();
 const visualCorrectionIdentityQuat = new THREE.Quaternion();
 const localVisualBeforePosition = new THREE.Vector3();
 const localVisualBeforeQuaternion = new THREE.Quaternion();
+const jitterPreviousVisualPosition = new THREE.Vector3();
+const jitterPreviousVelocity = new THREE.Vector3();
+const jitterPreviousAcceleration = new THREE.Vector3();
+const jitterCurrentVelocity = new THREE.Vector3();
+const jitterCurrentAcceleration = new THREE.Vector3();
 const wheelTagSkin = 0.02;
 const wheelTagBounds = {
   minX: -1.05,
@@ -157,14 +162,15 @@ const tagBursts = [];
 const minWheelSupportDot = -0.34;
 const maxInputSendIntervalMs = 1000 / 60;
 const maxPredictionInputHistory = 180;
+const maxPredictionReplayCatchupMs = 250;
 const maxSeenReliableEvents = 256;
-const remoteInterpolationBaseDelayMs = 110;
-const remoteInterpolationMinDelayMs = 95;
-const remoteInterpolationMaxDelayMs = 190;
+const remoteInterpolationBaseDelayMs = 95;
+const remoteInterpolationMinDelayMs = 80;
+const remoteInterpolationMaxDelayMs = 170;
 const remoteInterpolationMaxExtrapolateMs = 120;
 const remoteSnapshotBufferLimit = 16;
 const remoteSnapDistanceSq = 900;
-const visualCorrectionDecayRate = 12;
+const visualCorrectionDecayRate = 8.5;
 const visualCorrectionSnapDistanceSq = 900;
 const visualCorrectionMinDistanceSq = 0.0004;
 const maxPlayerNameLength = 14;
@@ -175,7 +181,16 @@ const collisionGroups = {
 
 let profilePhase = "idle";
 const profileSampleLimit = 30000;
+const jitterSampleLimit = 720;
 const detailedProfile = {};
+const localJitterStats = {
+  enabled: false,
+  startedAt: 0,
+  samples: [],
+  hasPrevious: false,
+  hasPreviousVelocity: false,
+  hasPreviousAcceleration: false,
+};
 
 function resetDetailedProfile(enabled = detailedProfile.enabled ?? false) {
   detailedProfile.enabled = enabled;
@@ -2622,6 +2637,10 @@ const multiplayerState = {
     maxCorrection: 0,
     lastCorrection: 0,
     largeCorrections: 0,
+    lastVisualCorrection: 0,
+    maxVisualCorrection: 0,
+    lastReplayCatchupMs: 0,
+    maxReplayCatchupMs: 0,
   },
   remoteInterpolationStats: {
     delayMs: remoteInterpolationBaseDelayMs,
@@ -3139,6 +3158,82 @@ function clearVisualCorrection(car) {
   car.visualCorrectionActive = false;
 }
 
+function percentileValue(values, pct) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((pct / 100) * sorted.length) - 1));
+  return sorted[index];
+}
+
+function resetLocalJitterStats() {
+  localJitterStats.enabled = true;
+  localJitterStats.startedAt = performance.now();
+  localJitterStats.samples = [];
+  localJitterStats.hasPrevious = false;
+  localJitterStats.hasPreviousVelocity = false;
+  localJitterStats.hasPreviousAcceleration = false;
+}
+
+function stopLocalJitterStats() {
+  localJitterStats.enabled = false;
+}
+
+function summarizeLocalJitterStats() {
+  const samples = localJitterStats.samples;
+  const corrections = samples.map((sample) => sample.correction);
+  const visualSteps = samples.map((sample) => sample.visualStep);
+  const accelerations = samples.map((sample) => sample.visualAcceleration);
+  const jerks = samples.map((sample) => sample.visualJerk);
+  return {
+    enabled: localJitterStats.enabled,
+    sampleCount: samples.length,
+    durationMs: samples.length
+      ? samples[samples.length - 1].t - samples[0].t
+      : 0,
+    correctionAvg: corrections.reduce((sum, value) => sum + value, 0) / Math.max(1, corrections.length),
+    correctionP95: percentileValue(corrections, 95),
+    correctionMax: Math.max(0, ...corrections),
+    correctionOver2cm: corrections.filter((value) => value > 0.02).length,
+    correctionOver8cm: corrections.filter((value) => value > 0.08).length,
+    visualStepP95: percentileValue(visualSteps, 95),
+    visualStepMax: Math.max(0, ...visualSteps),
+    visualAccelerationP95: percentileValue(accelerations, 95),
+    visualJerkP95: percentileValue(jerks, 95),
+  };
+}
+
+function recordLocalJitterSample(car, dt) {
+  if (!localJitterStats.enabled || car !== playerCar || gameState.phase !== "playing") return;
+  const now = performance.now();
+  const sample = {
+    t: now - localJitterStats.startedAt,
+    correction: car.visualCorrectionActive ? car.visualCorrectionPosition.length() : 0,
+    visualStep: 0,
+    visualAcceleration: 0,
+    visualJerk: 0,
+  };
+  if (localJitterStats.hasPrevious && dt > 0 && dt < 0.12) {
+    const invDt = 1 / dt;
+    sample.visualStep = tmpVec3A.copy(car.visual.position).sub(jitterPreviousVisualPosition).length();
+    jitterCurrentVelocity.copy(tmpVec3A).multiplyScalar(invDt);
+    if (localJitterStats.hasPreviousVelocity) {
+      jitterCurrentAcceleration.copy(jitterCurrentVelocity).sub(jitterPreviousVelocity).multiplyScalar(invDt);
+      sample.visualAcceleration = jitterCurrentAcceleration.length();
+      if (localJitterStats.hasPreviousAcceleration) {
+        sample.visualJerk = tmpVec3B.copy(jitterCurrentAcceleration).sub(jitterPreviousAcceleration).multiplyScalar(invDt).length();
+      }
+      jitterPreviousAcceleration.copy(jitterCurrentAcceleration);
+      localJitterStats.hasPreviousAcceleration = true;
+    }
+    jitterPreviousVelocity.copy(jitterCurrentVelocity);
+    localJitterStats.hasPreviousVelocity = true;
+  }
+  jitterPreviousVisualPosition.copy(car.visual.position);
+  localJitterStats.hasPrevious = true;
+  localJitterStats.samples.push(sample);
+  while (localJitterStats.samples.length > jitterSampleLimit) localJitterStats.samples.shift();
+}
+
 function preserveCarVisualContinuity(car, beforePosition, beforeQuaternion, { snapDistanceSq = visualCorrectionSnapDistanceSq } = {}) {
   if (!car || !beforePosition || !beforeQuaternion) return;
   const correction = car.visualCorrectionPosition
@@ -3325,6 +3420,13 @@ function cloneInputSnapshot(inputSnapshot = {}) {
     jumpQueued: Boolean(inputSnapshot.jumpQueued),
     airRoll: THREE.MathUtils.clamp(Number(inputSnapshot.airRoll) || 0, -1, 1),
   };
+}
+
+function cloneCurrentContinuousInputSnapshot() {
+  const snapshot = cloneInputSnapshot(playerCar.input);
+  snapshot.boostQueued = false;
+  snapshot.jumpQueued = false;
+  return snapshot;
 }
 
 function recordPredictionInputSample(sequence, inputSnapshot, tickNow) {
@@ -3888,6 +3990,9 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
   const sessionId = multiplayerState.sessionId;
   if (!snapshot || !predictedRound?.sim || !sessionId) return;
 
+  const previousClientTickNow = Number.isFinite(predictedRound.clientTickNow)
+    ? predictedRound.clientTickNow
+    : predictedRound.sim.lastTick;
   const localSnapshot = snapshot.cars.find((carSnapshot) => carSnapshot.sessionId === sessionId);
   const predictedCar = localSnapshot ? predictedRound.sim.cars.get(localSnapshot.key) : null;
   const preserveLocalVisual = Boolean(localSnapshot && predictedCar && gameState.phase === "playing");
@@ -3910,6 +4015,10 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     predictedRound.playStartsAt,
     snapshot.simLastTick ?? snapshot.serverTime ?? Date.now(),
   );
+  const targetClientTickNow = Math.min(
+    Math.max(baseTickNow, previousClientTickNow ?? baseTickNow),
+    baseTickNow + maxPredictionReplayCatchupMs,
+  );
   for (const carSnapshot of snapshot.cars) {
     setPredictedCarFromSnapshot(carSnapshot);
   }
@@ -3922,17 +4031,53 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     .sort((a, b) => a.sequence - b.sequence);
 
   let replayTickNow = baseTickNow;
+  let latestReplayInput = cloneInputSnapshot(localSnapshot?.input ?? predictedRound.sim.inputs.get(sessionId));
+  let latestReplaySequence = multiplayerState.acknowledgedInputSequence;
+  const currentContinuousInput = cloneCurrentContinuousInputSnapshot();
   for (const sample of replaySamples) {
-    predictedRound.sim.inputs.set(sessionId, sample.input);
-    predictedRound.sim.inputSequences.set(sessionId, sample.sequence);
-    replayTickNow = Math.max(replayTickNow + fixedStep * 1000, sample.tickNow);
+    latestReplayInput = sample.input;
+    latestReplaySequence = sample.sequence;
+    predictedRound.sim.inputs.set(sessionId, latestReplayInput);
+    predictedRound.sim.inputSequences.set(sessionId, latestReplaySequence);
+    replayTickNow = Math.min(
+      targetClientTickNow,
+      Math.max(replayTickNow + fixedStep * 1000, sample.tickNow),
+    );
     tickSharedCannonSim(predictedRound, replayTickNow);
     predictedRound.clientTickNow = replayTickNow;
   }
+  latestReplayInput = currentContinuousInput;
+  predictedRound.sim.inputs.set(sessionId, latestReplayInput);
+  predictedRound.sim.inputSequences.set(sessionId, latestReplaySequence);
+  while (replayTickNow + fixedStep * 1000 <= targetClientTickNow + 0.001) {
+    replayTickNow += fixedStep * 1000;
+    tickSharedCannonSim(predictedRound, replayTickNow);
+    predictedRound.clientTickNow = replayTickNow;
+  }
+  if (replayTickNow + 0.001 < targetClientTickNow) {
+    replayTickNow = targetClientTickNow;
+    tickSharedCannonSim(predictedRound, replayTickNow);
+    predictedRound.clientTickNow = replayTickNow;
+  }
+  multiplayerState.predictionStats.lastReplayCatchupMs = Math.max(0, replayTickNow - baseTickNow);
+  multiplayerState.predictionStats.maxReplayCatchupMs = Math.max(
+    multiplayerState.predictionStats.maxReplayCatchupMs,
+    multiplayerState.predictionStats.lastReplayCatchupMs,
+  );
 
   if (preserveLocalVisual) {
     const replayedLocalCar = predictedRound.sim.cars.get(localSnapshot.key);
     if (replayedLocalCar) {
+      const visualCorrection = localVisualBeforePosition.distanceTo(tmpVec3A.set(
+        replayedLocalCar.body.position.x,
+        replayedLocalCar.body.position.y,
+        replayedLocalCar.body.position.z,
+      ));
+      multiplayerState.predictionStats.lastVisualCorrection = visualCorrection;
+      multiplayerState.predictionStats.maxVisualCorrection = Math.max(
+        multiplayerState.predictionStats.maxVisualCorrection,
+        visualCorrection,
+      );
       writeSharedCannonCarBodyState(playerCar, replayedLocalCar, { snap: true });
       preserveCarVisualContinuity(playerCar, localVisualBeforePosition, localVisualBeforeQuaternion);
     }
@@ -4032,6 +4177,10 @@ function resetNetworkCars() {
   multiplayerState.predictionStats.maxCorrection = 0;
   multiplayerState.predictionStats.lastCorrection = 0;
   multiplayerState.predictionStats.largeCorrections = 0;
+  multiplayerState.predictionStats.lastVisualCorrection = 0;
+  multiplayerState.predictionStats.maxVisualCorrection = 0;
+  multiplayerState.predictionStats.lastReplayCatchupMs = 0;
+  multiplayerState.predictionStats.maxReplayCatchupMs = 0;
   multiplayerState.remoteInterpolationStats.delayMs = remoteInterpolationBaseDelayMs;
   multiplayerState.remoteInterpolationStats.extrapolations = 0;
   multiplayerState.remoteInterpolationStats.bufferUnderruns = 0;
@@ -4101,9 +4250,9 @@ function currentRemoteInterpolationDelay() {
   const jitter = Number.isFinite(multiplayerState.jitterMs) ? multiplayerState.jitterMs : 0;
   const ping = Number.isFinite(multiplayerState.pingMs) ? multiplayerState.pingMs : 100;
   const avgSnapshot = averageSnapshotMs();
-  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.7 : remoteInterpolationBaseDelayMs;
+  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.45 : remoteInterpolationBaseDelayMs;
   return THREE.MathUtils.clamp(
-    Math.max(remoteInterpolationBaseDelayMs, ping * 0.35 + cadenceDelay + jitter * 1.3),
+    Math.max(remoteInterpolationBaseDelayMs, ping * 0.32 + cadenceDelay + jitter * 1.15),
     remoteInterpolationMinDelayMs,
     remoteInterpolationMaxDelayMs,
   );
@@ -5623,6 +5772,7 @@ function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
     .slerp(tmpQuatB.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w), interpolationAlpha);
   car.visual.quaternion.copy(tmpQuat);
   applyCarVisualCorrection(car, dt);
+  recordLocalJitterSample(car, dt);
   carBodyVisualMatrix.compose(car.visual.position, car.visual.quaternion, car.visual.scale);
   setCarBodyVisualMatrix(car.bodyVisuals, car.visual.visible ? carBodyVisualMatrix : hiddenWheelMatrix);
 
@@ -6132,6 +6282,15 @@ window.__arenaCarDebug = {
   resetDetailedPerf() {
     resetDetailedProfile(true);
   },
+  resetJitterStats() {
+    resetLocalJitterStats();
+  },
+  stopJitterStats() {
+    stopLocalJitterStats();
+  },
+  getJitterStats() {
+    return summarizeLocalJitterStats();
+  },
   getInputAxes() {
     return keyboardAxes();
   },
@@ -6208,6 +6367,34 @@ window.__arenaCarDebug = {
       velocity: [playerCar.body.velocity.x, playerCar.body.velocity.y, playerCar.body.velocity.z],
       angularVelocity: [playerCar.body.angularVelocity.x, playerCar.body.angularVelocity.y, playerCar.body.angularVelocity.z],
       quaternion: [playerCar.body.quaternion.x, playerCar.body.quaternion.y, playerCar.body.quaternion.z, playerCar.body.quaternion.w],
+      visual: {
+        position: [playerCar.visual.position.x, playerCar.visual.position.y, playerCar.visual.position.z],
+        quaternion: [
+          playerCar.visual.quaternion.x,
+          playerCar.visual.quaternion.y,
+          playerCar.visual.quaternion.z,
+          playerCar.visual.quaternion.w,
+        ],
+        bodyDelta: [
+          playerCar.visual.position.x - playerCar.body.position.x,
+          playerCar.visual.position.y - playerCar.body.position.y,
+          playerCar.visual.position.z - playerCar.body.position.z,
+        ],
+      },
+      visualCorrection: {
+        active: Boolean(playerCar.visualCorrectionActive),
+        position: [
+          playerCar.visualCorrectionPosition.x,
+          playerCar.visualCorrectionPosition.y,
+          playerCar.visualCorrectionPosition.z,
+        ],
+        quaternion: [
+          playerCar.visualCorrectionQuaternion.x,
+          playerCar.visualCorrectionQuaternion.y,
+          playerCar.visualCorrectionQuaternion.z,
+          playerCar.visualCorrectionQuaternion.w,
+        ],
+      },
       speed: Math.abs(playerCar.vehicle.currentVehicleSpeedKmHour) * 0.621371,
       boostCooldown: playerCar.boostCooldownRemaining,
       boostActive: playerCar.boostTimeRemaining,
@@ -6220,6 +6407,7 @@ window.__arenaCarDebug = {
         acknowledgedInputSequence: multiplayerState.acknowledgedInputSequence,
         sentInputSequence: multiplayerState.inputSequence,
         predictionStats: { ...multiplayerState.predictionStats },
+        jitterStats: summarizeLocalJitterStats(),
         remoteInterpolationStats: {
           ...multiplayerState.remoteInterpolationStats,
           avgBufferSize: multiplayerState.remoteInterpolationStats.bufferSampleCount
