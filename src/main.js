@@ -4453,12 +4453,13 @@ function updatePlayerInput() {
   }
 
   const playerInput = clampPlayerInput(keyboardAxes());
+  const boostPressedThisFrame = playerInput.boost && !playerCar.input.boost;
   playerCar.input.throttle = playerInput.throttle;
   playerCar.input.steer = playerInput.steer;
   playerCar.input.boost = playerInput.boost;
   playerCar.input.airRoll = playerInput.airRoll;
   playerCar.input.jumpQueued = playerCar.input.jumpQueued || input.jumpQueued;
-  playerCar.input.boostQueued = playerCar.input.boostQueued || input.boostQueued;
+  playerCar.input.boostQueued = playerCar.input.boostQueued || input.boostQueued || boostPressedThisFrame;
   sendLocalInput();
   input.jumpQueued = false;
   input.boostQueued = false;
@@ -5503,6 +5504,7 @@ function syncVisuals(dt, interpolationAlpha) {
 
 function runUnprofiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) {
   if (gameState.phase === "countdown") {
+    input.boostQueued = false;
     for (const car of gameState.cars) clearVehicleInputs(car);
     mirrorSharedCannonCountdownState();
     updateNetworkControlledCars(fixedStep);
@@ -5575,6 +5577,7 @@ function runProfiledPlayingStep({ scriptedPlayer = false, stepIndex = 0 } = {}) 
   if (gameState.phase === "countdown") {
     const previousPhase = setProfilePhase("countdown");
     const bucketStart = performance.now();
+    input.boostQueued = false;
     for (const car of gameState.cars) clearVehicleInputs(car);
     mirrorSharedCannonCountdownState();
     updateNetworkControlledCars(fixedStep);

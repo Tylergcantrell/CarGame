@@ -20,6 +20,7 @@ export const touchInput = {
 };
 
 const keys = new Set();
+let mouseBoostHeld = false;
 const lastTouchCommandAt = {
   boost: -Infinity,
   jump: -Infinity,
@@ -32,6 +33,17 @@ function isTypingTarget(target) {
     tagName === "textarea" ||
     tagName === "select" ||
     target.isContentEditable;
+}
+
+function isControlTarget(target) {
+  return target instanceof HTMLElement &&
+    Boolean(target.closest("button, input, textarea, select, a, details, summary, [role='button']"));
+}
+
+function isGameplayMouseTarget(target) {
+  return target instanceof HTMLCanvasElement ||
+    target === document.body ||
+    target === document.documentElement;
 }
 
 function controlCode(event) {
@@ -50,7 +62,7 @@ export function keyboardAxes() {
   return {
     throttle: (forward ? 1 : 0) + (reverse ? -1 : 0),
     steer: (left ? 1 : 0) + (right ? -1 : 0),
-    boost: keys.has("ShiftLeft") || keys.has("ShiftRight"),
+    boost: mouseBoostHeld,
     airRoll: (rollRight ? 1 : 0) + (rollLeft ? -1 : 0),
   };
 }
@@ -120,26 +132,47 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
       "ArrowRight",
       "KeyQ",
       "KeyE",
-      "ShiftLeft",
-      "ShiftRight",
       "Space",
     ];
-    if (desktopCameraToggle) handledCodes.push("KeyR");
     if (handledCodes.includes(code)) {
       event.preventDefault();
     }
 
     if (!keys.has(code) && code === "Space") input.jumpQueued = true;
-    if (!keys.has(code) && (code === "ShiftLeft" || code === "ShiftRight")) input.boostQueued = true;
-    if (!keys.has(code) && desktopCameraToggle && code === "KeyR") {
-      input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
-    }
     keys.add(code);
   });
 
   window.addEventListener("keyup", (event) => {
     keys.delete(controlCode(event));
   });
+
+  if (desktopCameraToggle) {
+    window.addEventListener("mousedown", (event) => {
+      if (isTypingTarget(event.target) || isControlTarget(event.target) || !isGameplayMouseTarget(event.target)) return;
+      if (event.button === 0) {
+        if (!mouseBoostHeld) input.boostQueued = true;
+        mouseBoostHeld = true;
+        event.preventDefault();
+      } else if (event.button === 2) {
+        input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
+        event.preventDefault();
+      }
+    });
+
+    window.addEventListener("mouseup", (event) => {
+      if (event.button === 0) mouseBoostHeld = false;
+    });
+
+    window.addEventListener("blur", () => {
+      mouseBoostHeld = false;
+    });
+
+    window.addEventListener("contextmenu", (event) => {
+      if (!isTypingTarget(event.target) && !isControlTarget(event.target) && isGameplayMouseTarget(event.target)) {
+        event.preventDefault();
+      }
+    });
+  }
 
   joystickEl.addEventListener("pointerdown", (event) => {
     cancelTouchEvent(event);
