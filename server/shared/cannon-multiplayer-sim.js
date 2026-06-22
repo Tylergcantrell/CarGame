@@ -1278,7 +1278,6 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
     roundId: round.id,
     serverTime: now,
     simLastTick: round.sim.lastTick,
-    simTick: round.sim.tick,
     simAccumulator: round.sim.accumulator,
     remainingMs,
     cars: round.slots.map((slot) => {
@@ -1300,32 +1299,6 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
         immunityRemaining: car.immunityRemaining,
         boostTimeRemaining: car.boostTimeRemaining,
         boostCooldownRemaining: car.boostCooldownRemaining,
-        manualRighting: car.manualRightingActive ? {
-          active: true,
-          elapsed: car.manualRightingElapsed,
-          startPosition: [
-            car.manualRightingStartPosition.x,
-            car.manualRightingStartPosition.y,
-            car.manualRightingStartPosition.z,
-          ],
-          targetPosition: [
-            car.manualRightingTargetPosition.x,
-            car.manualRightingTargetPosition.y,
-            car.manualRightingTargetPosition.z,
-          ],
-          startQuaternion: [
-            car.manualRightingStartQuaternion.x,
-            car.manualRightingStartQuaternion.y,
-            car.manualRightingStartQuaternion.z,
-            car.manualRightingStartQuaternion.w,
-          ],
-          targetQuaternion: [
-            car.manualRightingTargetQuaternion.x,
-            car.manualRightingTargetQuaternion.y,
-            car.manualRightingTargetQuaternion.z,
-            car.manualRightingTargetQuaternion.w,
-          ],
-        } : null,
         inputSequence: slot.sessionId ? (round.sim.inputSequences.get(slot.sessionId) ?? 0) : 0,
         input: clampInput(car.input),
       };

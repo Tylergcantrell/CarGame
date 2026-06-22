@@ -60,25 +60,8 @@ assert(distance > 1, "Cannon player should move after sustained throttle");
 assert.equal(movedPlayer.inputSequence, 7, "snapshot should acknowledge latest input sequence");
 assert(movedPlayer.position[1] > 0, "Cannon player should stay above world floor");
 assert.equal(typeof moved.simLastTick, "number", "snapshot should expose the server sim tick clock");
-assert.equal(typeof moved.simTick, "number", "snapshot should expose the server sim tick index");
-assert(moved.simTick > initial.simTick, "snapshot sim tick should advance as the server sim steps");
 assert.equal(typeof moved.simAccumulator, "number", "snapshot should expose the server fixed-step accumulator");
 assert(moved.simAccumulator >= 0 && moved.simAccumulator < 1 / 60, "snapshot accumulator should stay within one fixed step");
-
-const rightingSnapshotRound = makeRound();
-rightingSnapshotRound.sim = createSimState(rightingSnapshotRound, { now: 0, rng: () => 0 });
-const rightingSnapshotCar = rightingSnapshotRound.sim.cars.get("player:a");
-rightingSnapshotCar.manualRightingActive = true;
-rightingSnapshotCar.manualRightingElapsed = 0.12;
-rightingSnapshotCar.manualRightingTargetPosition.set(1, 2, 3);
-const rightingSnapshot = makeSnapshot("TEST", rightingSnapshotRound, 0);
-const rightingSnapshotPlayer = rightingSnapshot.cars.find((car) => car.sessionId === "a");
-assert.equal(rightingSnapshotPlayer.manualRighting.active, true, "snapshot should expose manual righting state");
-assert.deepEqual(
-  rightingSnapshotPlayer.manualRighting.targetPosition,
-  [1, 2, 3],
-  "snapshot should expose manual righting target position",
-);
 
 const queued = makeRound();
 queued.sim = createSimState(queued, { now: 0, rng: () => 0 });

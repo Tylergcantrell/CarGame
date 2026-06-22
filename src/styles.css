@@ -47,7 +47,7 @@ body {
   inset: 0;
   z-index: 10;
   display: grid;
-  overflow-x: hidden;
+  overflow: hidden;
   color: #f7f1e2;
   background:
     linear-gradient(90deg, rgba(255, 105, 31, 0.11) 0 1px, transparent 1px 100%),
@@ -60,13 +60,19 @@ body {
   display: none !important;
 }
 
+.screen-menu {
+  overflow: hidden auto;
+  place-items: start center;
+  padding: 24px 0;
+}
+
 .menu-shell {
   position: relative;
   isolation: isolate;
   width: min(760px, calc(100vw - 36px));
   max-width: 100%;
   min-height: min(600px, calc(100vh - 36px));
-  align-self: center;
+  align-self: start;
   justify-self: center;
   display: grid;
   grid-template-columns: 1fr;
