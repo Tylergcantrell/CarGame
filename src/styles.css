@@ -158,6 +158,12 @@ body[data-phase="ended"] .jump-button {
   visibility: hidden;
 }
 
+body[data-spectating="true"] .boost-meter,
+body[data-spectating="true"] .jump-button,
+body[data-spectating="true"] .touch-controls {
+  visibility: hidden;
+}
+
 .countdown {
   position: fixed;
   inset: 0;
@@ -714,6 +720,26 @@ body[data-phase="ended"] .jump-button {
   visibility: hidden;
 }
 
+.spectate-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  margin-bottom: 12px;
+  color: #d9dfd1;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.spectate-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: #ff8a2a;
+  cursor: pointer;
+}
+
 .primary-action {
   width: 100%;
   min-height: 46px;
@@ -756,7 +782,11 @@ body[data-game-mode="solo"] .menu-grid select {
 }
 
 body[data-game-mode="solo"] .color-section {
-  margin-bottom: clamp(24px, 5.8vh, 62px);
+  margin-bottom: clamp(10px, 2.2vh, 22px);
+}
+
+body[data-game-mode="solo"] .spectate-option {
+  margin-bottom: clamp(18px, 4.2vh, 46px);
 }
 
 body[data-game-mode="solo"] .color-swatch {

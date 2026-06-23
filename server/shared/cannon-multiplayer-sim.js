@@ -112,12 +112,12 @@ const stuntCarNoseFaces = [
   [3, 7, 4, 0],
 ];
 const stuntCarTubVertices = [
-  -1.08, -0.4, -1.58,
-  1.08, -0.4, -1.58,
+  -0.48, -0.4, -1.58,
+  0.48, -0.4, -1.58,
   1.02, -0.4, 0.88,
   -1.02, -0.4, 0.88,
-  -0.84, 0.44, -1.52,
-  0.84, 0.44, -1.52,
+  -0.84, 0.44, -1.34,
+  0.84, 0.44, -1.34,
   0.66, 0.24, 0.9,
   -0.66, 0.24, 0.9,
 ];
@@ -147,7 +147,6 @@ const stuntCarCanopyFaces = [
   [2, 6, 7, 3],
   [3, 7, 4, 0],
 ];
-
 export function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -517,10 +516,10 @@ function createCar(world, materials, slot, rng = Math.random) {
   leftSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), sideSkidAngle);
   const rightSkidQuat = new CANNON.Quaternion();
   rightSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), -sideSkidAngle);
-  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.58), new CANNON.Vec3(-1.22, -0.38 + chassisBodyLift, -0.02), materials.chassisMaterial, leftSkidQuat);
-  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.58), new CANNON.Vec3(1.22, -0.38 + chassisBodyLift, -0.02), materials.chassisMaterial, rightSkidQuat);
+  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.34), new CANNON.Vec3(-1.22, -0.38 + chassisBodyLift, 0.18), materials.chassisMaterial, leftSkidQuat);
+  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.34), new CANNON.Vec3(1.22, -0.38 + chassisBodyLift, 0.18), materials.chassisMaterial, rightSkidQuat);
   addChassisBox(new CANNON.Vec3(1.05, 0.05, 0.08), new CANNON.Vec3(0, -0.28 + chassisBodyLift, 1.44));
-  addChassisBox(new CANNON.Vec3(1.02, 0.05, 0.08), new CANNON.Vec3(0, -0.24 + chassisBodyLift, -1.5));
+  addChassisBox(new CANNON.Vec3(0.26, 0.035, 0.04), new CANNON.Vec3(0, -0.42 + chassisBodyLift, -1.5));
 
   const vehicle = new CANNON.RaycastVehicle({
     chassisBody: body,
@@ -562,8 +561,6 @@ function createCar(world, materials, slot, rng = Math.random) {
     isIt: false,
     immunityRemaining: 0,
     ai: {
-      waypoint: new THREE.Vector3(),
-      waypointTimer: 0,
       stuckTimer: 0,
       reverseTimer: 0,
       unstickTimer: 0,
@@ -660,8 +657,37 @@ function resetWheelGrip(car) {
     car.vehicle.wheelInfos[i].frictionSlip = i < 2 ? wheelOptions.frictionSlip : rearWheelOptions.frictionSlip;
   }
 }
+
+function endStandingInfo(car) {
+  if (car.manualRightingActive) return null;
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  const forward = tmpVec3A.set(0, 0, 1).applyQuaternion(tmpQuat);
+  const up = tmpVec3B.set(0, 1, 0).applyQuaternion(tmpQuat);
+  if (Math.abs(forward.y) < 0.8 || Math.abs(up.y) > 0.5) return null;
+  const nearSurface =
+    car.vehicle.numWheelsOnGround > 0 ||
+    car.surfaceContactGrace > 0 ||
+    (Number.isFinite(car.body.position.y) && car.body.position.y < 3.2);
+  if (!nearSurface) return null;
+  return { forwardY: forward.y };
+}
+
+function isEndStanding(car) {
+  return Boolean(endStandingInfo(car));
+}
+
+function hasDrivableOrientation(car) {
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  const carUp = tmpVec3A.set(0, 1, 0).applyQuaternion(tmpQuat).normalize();
+  const nearFloor = Number.isFinite(car.body.position.y) && car.body.position.y < 3.2;
+  if (nearFloor && carUp.y < 0.28) return false;
+  if (car.vehicle.numWheelsOnGround <= 0) return true;
+  const contact = closestStabilityContactForCar(car);
+  return carUp.dot(contact.normal) > 0.28;
+}
+
 function driveCar(car) {
-  if (car.manualRightingActive) {
+  if (car.manualRightingActive || isEndStanding(car) || !hasDrivableOrientation(car)) {
     clearVehicleInputs(car);
     return;
   }
@@ -958,7 +984,6 @@ function applyAirControls(car) {
   const surfaceUpDot = carUp.dot(contact.normal);
   const tippedEnoughForAirControl = surfaceUpDot < 0.55;
 
-  if (!car.isPlayer) return;
   if (car.vehicle.numWheelsOnGround >= 2 && !tippedEnoughForAirControl) return;
 
   const pitchInput = car.input.throttle;
@@ -978,7 +1003,7 @@ function applyAirControls(car) {
 
 function applyBoost(car, dt) {
   car.boostCooldownRemaining = Math.max(0, car.boostCooldownRemaining - dt);
-  if (car.manualRightingActive) {
+  if (car.manualRightingActive || isEndStanding(car)) {
     car.input.boostQueued = false;
     car.boostTimeRemaining = 0;
     return;
@@ -1003,6 +1028,11 @@ function applyQueuedJump(car) {
   const tippedForRighting = contact && surfaceUpDotForCar(car, contact) < vehicleTuning.manualRightingDot;
   if (tippedForRighting) {
     startManualRighting(car, contact);
+    car.input.jumpQueued = false;
+    return;
+  }
+
+  if (isEndStanding(car) || !hasDrivableOrientation(car)) {
     car.input.jumpQueued = false;
     return;
   }

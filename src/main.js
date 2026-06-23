@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import * as CANNON from "cannon-es";
-import { pickWaypoint, updateAiCar } from "../server/shared/ai.js";
+import { updateAiCar } from "../server/shared/ai.js";
 import {
   arenaDefinitions,
   worldSpec,
@@ -996,12 +996,12 @@ const stuntCarNoseFaces = [
   [3, 7, 4, 0],
 ];
 const stuntCarTubVertices = [
-  -1.08, -0.4, -1.58,
-  1.08, -0.4, -1.58,
+  -0.48, -0.4, -1.58,
+  0.48, -0.4, -1.58,
   1.02, -0.4, 0.88,
   -1.02, -0.4, 0.88,
-  -0.84, 0.44, -1.52,
-  0.84, 0.44, -1.52,
+  -0.84, 0.44, -1.34,
+  0.84, 0.44, -1.34,
   0.66, 0.24, 0.9,
   -0.66, 0.24, 0.9,
 ];
@@ -2505,6 +2505,8 @@ const arenaSelect = document.querySelector("#arena-select");
 const colorPickerEl = document.querySelector("#color-picker");
 const setupGridEl = document.querySelector(".menu-grid");
 const colorSectionEl = document.querySelector(".color-section");
+const spectateOptionEl = document.querySelector("#spectate-option");
+const spectateAiCheckbox = document.querySelector("#spectate-ai");
 const modeSoloButton = document.querySelector("#mode-solo");
 const modeMultiplayerButton = document.querySelector("#mode-multiplayer");
 const multiplayerPanelEl = document.querySelector("#multiplayer-panel");
@@ -2575,6 +2577,7 @@ const gameState = {
   lastLeaderboardRender: 0,
   pausedFromPhase: null,
   pauseMenuOpen: false,
+  spectating: false,
 };
 
 const configuredServerUrl = String(
@@ -2737,7 +2740,8 @@ function recordPerfSample(frameMs, simMs, renderMs, steps) {
 
 function setUiPhase(phase) {
   document.body.dataset.phase = phase;
-  setActionInputEnabled(phase === "playing");
+  document.body.dataset.spectating = gameState.spectating ? "true" : "false";
+  setActionInputEnabled(phase === "playing" && !gameState.spectating);
 }
 
 function makeInputState() {
@@ -2857,10 +2861,10 @@ function createCar({ id, name, color, isPlayer = false }) {
   leftSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), sideSkidAngle);
   const rightSkidQuat = new CANNON.Quaternion();
   rightSkidQuat.setFromAxisAngle(new CANNON.Vec3(0, 0, 1), -sideSkidAngle);
-  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.58), new CANNON.Vec3(-1.22, -0.38 + chassisBodyLift, -0.02), chassisMaterial, leftSkidQuat);
-  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.58), new CANNON.Vec3(1.22, -0.38 + chassisBodyLift, -0.02), chassisMaterial, rightSkidQuat);
+  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.34), new CANNON.Vec3(-1.22, -0.38 + chassisBodyLift, 0.18), chassisMaterial, leftSkidQuat);
+  addChassisBox(new CANNON.Vec3(0.1, 0.08, 1.34), new CANNON.Vec3(1.22, -0.38 + chassisBodyLift, 0.18), chassisMaterial, rightSkidQuat);
   addChassisBox(new CANNON.Vec3(1.05, 0.05, 0.08), new CANNON.Vec3(0, -0.28 + chassisBodyLift, 1.44));
-  addChassisBox(new CANNON.Vec3(1.02, 0.05, 0.08), new CANNON.Vec3(0, -0.24 + chassisBodyLift, -1.5));
+  addChassisBox(new CANNON.Vec3(0.26, 0.035, 0.04), new CANNON.Vec3(0, -0.42 + chassisBodyLift, -1.5));
   const vehicle = new CANNON.RaycastVehicle({
     chassisBody: body,
     indexRightAxis: 0,
@@ -2921,8 +2925,6 @@ function createCar({ id, name, color, isPlayer = false }) {
     isIt: false,
     immunityRemaining: 0,
     ai: {
-      waypoint: new THREE.Vector3(),
-      waypointTimer: 0,
       stuckTimer: 0,
       reverseTimer: 0,
       unstickTimer: 0,
@@ -3406,7 +3408,6 @@ function getPooledAiCar(index, color) {
   car.name = color.name;
   setCarColor(car, color);
   activateCar(car);
-  pickWaypoint(car);
   return car;
 }
 
@@ -4249,7 +4250,7 @@ function applySharedCannonSnapshotToVisuals(snapshot, { localOnly = false, snap 
     if (!car) continue;
     car.score = carSnapshot.score;
     car.isIt = carSnapshot.isIt;
-    if (carSnapshot.input && car !== playerCar) car.input = cloneInputSnapshot(carSnapshot.input);
+    if (carSnapshot.input && (car !== playerCar || gameState.spectating)) car.input = cloneInputSnapshot(carSnapshot.input);
     car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
     car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
     car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
@@ -4598,7 +4599,7 @@ function applyServerSnapshot(snapshot) {
     if (!car) continue;
     car.score = carSnapshot.score;
     car.isIt = carSnapshot.isIt;
-    if (carSnapshot.input && car !== playerCar) car.input = cloneInputSnapshot(carSnapshot.input);
+    if (carSnapshot.input && (car !== playerCar || gameState.spectating)) car.input = cloneInputSnapshot(carSnapshot.input);
     car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
     car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
     car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
@@ -4689,6 +4690,7 @@ function updateMultiplayerControls() {
   );
   setupGridEl.classList.toggle("hidden", !showSetup);
   colorSectionEl.classList.toggle("hidden", !showColor);
+  spectateOptionEl.classList.toggle("hidden", multiplayerEnabled());
   startRoundButton.classList.toggle("hidden", multiplayerEnabled() && (!inRoom || !isRoomController() || multiplayerState.phase !== "lobby"));
   roundTimeSelect.disabled = !canEditSettings;
   playerCountSelect.disabled = !canEditSettings;
@@ -4696,7 +4698,7 @@ function updateMultiplayerControls() {
 
   if (!multiplayerEnabled()) {
     startRoundButton.disabled = false;
-    startRoundButton.textContent = "Start Round";
+    startRoundButton.textContent = spectateAiCheckbox.checked ? "Spectate Round" : "Start Round";
   } else if (!multiplayerState.connected) {
     startRoundButton.disabled = true;
     startRoundButton.textContent = "Connecting...";
@@ -5082,11 +5084,34 @@ function formatTime(seconds) {
   return `${minutes}:${String(secs).padStart(2, "0")}`;
 }
 
+function signedSpeedMphFor(car) {
+  tmpQuat.set(
+    car.body.quaternion.x,
+    car.body.quaternion.y,
+    car.body.quaternion.z,
+    car.body.quaternion.w,
+  );
+  const forward = tmpVec3A.set(0, 0, 1).applyQuaternion(tmpQuat).normalize();
+  const velocity = tmpVec3B.set(car.body.velocity.x, car.body.velocity.y, car.body.velocity.z);
+  return velocity.dot(forward) * 2.2369362920544;
+}
+
+function formatSignedMph(value) {
+  const rounded = Math.round(value);
+  if (Object.is(rounded, -0) || Math.abs(rounded) < 1) return "000";
+  const sign = rounded < 0 ? "-" : "";
+  return `${sign}${String(Math.abs(rounded)).padStart(3, "0")}`;
+}
+
 function updatePlayerInput() {
   if (gameState.phase !== "playing") {
     clearVehicleInputs(playerCar);
     input.jumpQueued = false;
     input.boostQueued = false;
+    return;
+  }
+  if (gameState.spectating) {
+    clearLocalInputState();
     return;
   }
   if (multiplayerEnabled() && gameState.pauseMenuOpen) {
@@ -5108,8 +5133,36 @@ function updatePlayerInput() {
   input.boostQueued = false;
 }
 
+function endStandingInfo(car) {
+  if (car.manualRightingActive) return null;
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  const forward = tmpVec3A.set(0, 0, 1).applyQuaternion(tmpQuat);
+  const up = tmpVec3B.set(0, 1, 0).applyQuaternion(tmpQuat);
+  if (Math.abs(forward.y) < 0.8 || Math.abs(up.y) > 0.5) return null;
+  const nearSurface =
+    car.vehicle.numWheelsOnGround > 0 ||
+    car.surfaceContactGrace > 0 ||
+    (Number.isFinite(car.body.position.y) && car.body.position.y < 3.2);
+  if (!nearSurface) return null;
+  return { forwardY: forward.y };
+}
+
+function isEndStanding(car) {
+  return Boolean(endStandingInfo(car));
+}
+
+function hasDrivableOrientation(car) {
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  const carUp = tmpVec3A.set(0, 1, 0).applyQuaternion(tmpQuat).normalize();
+  const nearFloor = Number.isFinite(car.body.position.y) && car.body.position.y < 3.2;
+  if (nearFloor && carUp.y < 0.28) return false;
+  if (car.vehicle.numWheelsOnGround <= 0) return true;
+  const contact = closestStabilityContactForCar(car);
+  return carUp.dot(contact.normal) > 0.28;
+}
+
 function driveCar(car) {
-  if (gameState.phase !== "playing" || car.manualRightingActive) {
+  if (gameState.phase !== "playing" || car.manualRightingActive || isEndStanding(car) || !hasDrivableOrientation(car)) {
     clearVehicleInputs(car);
     return;
   }
@@ -5369,8 +5422,6 @@ function applyAirControls(car) {
   const surfaceUpDot = carUp.dot(contact.normal);
   const tippedEnoughForAirControl = surfaceUpDot < 0.55;
 
-  if (!car.isPlayer) return;
-
   if (car.vehicle.numWheelsOnGround >= 2 && !tippedEnoughForAirControl) return;
 
   const pitchInput = car.input.throttle;
@@ -5391,7 +5442,7 @@ function applyAirControls(car) {
 function applyBoost(car, dt) {
   car.boostCooldownRemaining = Math.max(0, car.boostCooldownRemaining - dt);
 
-  if (gameState.phase !== "playing" || car.manualRightingActive) {
+  if (gameState.phase !== "playing" || car.manualRightingActive || isEndStanding(car)) {
     car.input.boostQueued = false;
     car.boostTimeRemaining = 0;
     return;
@@ -5424,6 +5475,11 @@ function applyQueuedJump(car) {
   const tippedForRighting = contact && surfaceUpDotForCar(car, contact) < vehicleTuning.manualRightingDot;
   if (tippedForRighting) {
     startManualRighting(car, contact);
+    car.input.jumpQueued = false;
+    return;
+  }
+
+  if (isEndStanding(car) || !hasDrivableOrientation(car)) {
     car.input.jumpQueued = false;
     return;
   }
@@ -5741,17 +5797,26 @@ function startRound(options = {}) {
   const localSessionId = options.localSessionId ?? "solo";
   const localClientId = options.localClientId ?? "solo";
   const skipCountdown = Boolean(options.skipCountdown);
+  const spectating = !serverSlots && Boolean(options.spectating ?? spectateAiCheckbox.checked);
   const slots = serverSlots ?? (() => {
     const availableColors = shuffle(carPalette.filter((color) => color !== playerColor));
     return [
-      {
-        key: `player:${localSessionId}`,
-        type: "player",
-        clientId: localClientId,
-        sessionId: localSessionId,
-        name: "You",
-        color: playerColor.name,
-      },
+      spectating
+        ? {
+            key: `spectate:${localSessionId}`,
+            type: "ai",
+            id: `spectate-${localSessionId}`,
+            name: "You",
+            color: playerColor.name,
+          }
+        : {
+            key: `player:${localSessionId}`,
+            type: "player",
+            clientId: localClientId,
+            sessionId: localSessionId,
+            name: "You",
+            color: playerColor.name,
+          },
       ...Array.from({ length: Math.max(0, playerCount - 1) }, (_, index) => {
         const color = availableColors[index % availableColors.length];
         return {
@@ -5768,6 +5833,8 @@ function startRound(options = {}) {
   gameState.roundLength = roundLength;
   gameState.timeRemaining = gameState.roundLength;
   gameState.playerCount = slots.length;
+  gameState.spectating = spectating;
+  document.body.dataset.spectating = gameState.spectating ? "true" : "false";
   loadArena(arenaId);
   activateCar(playerCar);
   resetNetworkCars();
@@ -5856,6 +5923,7 @@ function returnToMenu(options = {}) {
     multiplayerState.activeRoundId = null;
   }
   gameState.phase = "menu";
+  gameState.spectating = false;
   setUiPhase("menu");
   clearTagBursts();
   for (const car of gameState.aiCars) deactivateCar(car);
@@ -6109,8 +6177,7 @@ function syncCountdownCamera() {
 }
 
 function updateHud(chaseState = chasePressureState()) {
-  const speedMph = Math.abs(playerCar.vehicle.currentVehicleSpeedKmHour) * 0.621371;
-  const speedText = String(Math.round(speedMph)).padStart(3, "0");
+  const speedText = formatSignedMph(signedSpeedMphFor(playerCar));
   if (hudCache.speedText !== speedText) {
     hudCache.speedText = speedText;
     speedEl.textContent = speedText;
@@ -6535,6 +6602,7 @@ window.__arenaCarDebug = {
   getState() {
     return {
       phase: gameState.phase,
+      spectating: gameState.spectating,
       roundTime: gameState.timeRemaining,
       it: gameState.itCar?.id ?? null,
       scores: gameState.cars.map((car) => ({
@@ -6602,7 +6670,7 @@ window.__arenaCarDebug = {
           playerCar.visualCorrectionQuaternion.w,
         ],
       },
-      speed: Math.abs(playerCar.vehicle.currentVehicleSpeedKmHour) * 0.621371,
+      speed: signedSpeedMphFor(playerCar),
       boostCooldown: playerCar.boostCooldownRemaining,
       boostActive: playerCar.boostTimeRemaining,
       multiplayer: {
@@ -6745,6 +6813,7 @@ function handleSetupChanged() {
 roundTimeSelect.addEventListener("change", handleSetupChanged);
 playerCountSelect.addEventListener("change", handleSetupChanged);
 arenaSelect.addEventListener("change", handleSetupChanged);
+spectateAiCheckbox.addEventListener("change", updateMultiplayerControls);
 modeSoloButton.addEventListener("click", () => setGameMode("solo"));
 modeMultiplayerButton.addEventListener("click", () => setGameMode("multiplayer"));
 connectServerButton.addEventListener("click", leaveCurrentRoom);

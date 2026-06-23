@@ -176,10 +176,8 @@ export function installInputControls({ boostHudEl, jumpButtonEl, joystickEl, joy
         if (actionInputEnabled && !mouseBoostHeld) input.boostQueued = true;
         mouseBoostHeld = true;
         event.preventDefault();
-      } else if (event.button === 2 && actionInputEnabled) {
-        input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
-        event.preventDefault();
       } else if (event.button === 2) {
+        input.cameraView = input.cameraView === "normal" ? "reverse" : "normal";
         event.preventDefault();
       }
     });
