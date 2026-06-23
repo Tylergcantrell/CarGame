@@ -179,6 +179,33 @@ wheel-wheel
 
 The main tuning constants live in `server/shared/cannon-multiplayer-sim.js` and `server/shared/vehicle-config.js`, including `wheelTagSkin`, `wheelTagBounds`, `vehicleTuning.tagImmunityDuration`, and the shared `tagCooldown`.
 
+## Future TODO: Server Rewind/Re-Sim
+
+Implement bounded authoritative server rewind/replay for late player inputs once the current tick-addressed protocol needs more accuracy than visual correction can hide.
+
+Current foundation:
+
+- Client inputs include an intended `targetTick`.
+- Server snapshots include authoritative `simTick` plus local `inputTick`.
+- Browser prediction can rebuild from an authoritative tick and replay stored local inputs.
+
+Goal:
+
+- When an input arrives late enough to matter, restore the room sim to `targetTick - 1`, insert the input, then replay forward to the current authoritative tick.
+- Improve local correction at real latency, tag fairness, and "I was there on my screen" cases without accepting client-authoritative hit claims.
+
+Implementation notes:
+
+- Keep a per-room history ring buffer for roughly `250ms` of sim ticks.
+- Snapshot enough state to restore Cannon/RaycastVehicle behavior correctly: body position/quaternion/velocity/angular velocity, steering, boost, queued jump/recovery state, score, `isIt`, immunity, tag cooldown, input maps/sequences/target ticks, AI state, and pending reliable events.
+- Coalesce multiple late inputs received in the same server frame so the room rewinds/replays once.
+- Cap replay depth, likely `8-12` ticks for normal use and a hard max near the history window.
+- Suppress or dedupe replayed tag events so rewind cannot double-emit reliable events or double-count scores.
+- Add metrics for replay count, replay ticks, replay milliseconds, skipped deep rewinds, and late-input age.
+- If replay exceeds a per-room CPU budget, skip deep rewind and record it instead of hitching the worker.
+
+This is expected to be computationally acceptable with `MAX_ACTIVE_ROOMS=WORKER_COUNT`, but it is correctness-sensitive because partial Cannon state restoration can create worse desync than no rewind.
+
 ## Launch Readiness
 
 Controlled alpha is acceptable when these pass on the target machine:

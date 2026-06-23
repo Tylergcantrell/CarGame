@@ -163,16 +163,24 @@ const minWheelSupportDot = -0.34;
 const maxInputSendIntervalMs = 1000 / 60;
 const maxPredictionInputHistory = 180;
 const maxPredictionReplayCatchupMs = 250;
+const maxPredictionReplayCatchupTicks = 23;
 const maxSeenReliableEvents = 256;
-const remoteInterpolationBaseDelayMs = 95;
-const remoteInterpolationMinDelayMs = 80;
-const remoteInterpolationMaxDelayMs = 170;
-const remoteInterpolationMaxExtrapolateMs = 120;
+const remoteInterpolationBaseDelayMs = 30;
+const remoteInterpolationMinDelayMs = 20;
+const remoteInterpolationMaxDelayMs = 85;
+const remoteInterpolationMaxExtrapolateMs = 220;
 const remoteSnapshotBufferLimit = 16;
 const remoteSnapDistanceSq = 900;
-const visualCorrectionDecayRate = 8.5;
+const networkPingIntervalMs = 1000;
+const pingDisplaySampleLimit = 9;
+const rttSampleWindowMs = 30000;
+const maxValidRttMs = 5000;
+const visualCorrectionDecayRate = 14;
+const localSmallCorrectionDecayRate = 48;
+const localMediumCorrectionDecayRate = 30;
 const visualCorrectionSnapDistanceSq = 900;
 const visualCorrectionMinDistanceSq = 0.0004;
+const localVisualCorrectionMinDistanceSq = 0.09;
 const maxPlayerNameLength = 14;
 const collisionGroups = {
   arena: 1,
@@ -2630,8 +2638,11 @@ const multiplayerState = {
   pingSentAt: 0,
   lastPingAt: 0,
   pingMs: null,
+  latestRttMs: null,
   jitterMs: null,
   lastPongAt: 0,
+  rttSamples: [],
+  pingDisplaySamples: [],
   predictionStats: {
     rebuilds: 0,
     maxCorrection: 0,
@@ -3181,6 +3192,10 @@ function stopLocalJitterStats() {
 function summarizeLocalJitterStats() {
   const samples = localJitterStats.samples;
   const corrections = samples.map((sample) => sample.correction);
+  const drivenSamples = samples.filter((sample) => sample.throttleActive);
+  const coastingSamples = samples.filter((sample) => !sample.throttleActive);
+  const drivenCorrections = drivenSamples.map((sample) => sample.correction);
+  const coastingCorrections = coastingSamples.map((sample) => sample.correction);
   const visualSteps = samples.map((sample) => sample.visualStep);
   const accelerations = samples.map((sample) => sample.visualAcceleration);
   const jerks = samples.map((sample) => sample.visualJerk);
@@ -3195,6 +3210,12 @@ function summarizeLocalJitterStats() {
     correctionMax: Math.max(0, ...corrections),
     correctionOver2cm: corrections.filter((value) => value > 0.02).length,
     correctionOver8cm: corrections.filter((value) => value > 0.08).length,
+    drivenCorrectionP95: percentileValue(drivenCorrections, 95),
+    drivenCorrectionMax: Math.max(0, ...drivenCorrections),
+    drivenSampleCount: drivenSamples.length,
+    coastingCorrectionP95: percentileValue(coastingCorrections, 95),
+    coastingCorrectionMax: Math.max(0, ...coastingCorrections),
+    coastingSampleCount: coastingSamples.length,
     visualStepP95: percentileValue(visualSteps, 95),
     visualStepMax: Math.max(0, ...visualSteps),
     visualAccelerationP95: percentileValue(accelerations, 95),
@@ -3208,6 +3229,7 @@ function recordLocalJitterSample(car, dt) {
   const sample = {
     t: now - localJitterStats.startedAt,
     correction: car.visualCorrectionActive ? car.visualCorrectionPosition.length() : 0,
+    throttleActive: Math.abs(car.input.throttle) > 0.08,
     visualStep: 0,
     visualAcceleration: 0,
     visualJerk: 0,
@@ -3255,7 +3277,7 @@ function preserveCarVisualContinuity(car, beforePosition, beforeQuaternion, { sn
     .multiply(visualCorrectionInverseQuat)
     .normalize();
   car.visualCorrectionActive =
-    distanceSq > visualCorrectionMinDistanceSq ||
+    distanceSq > (car === playerCar ? localVisualCorrectionMinDistanceSq : visualCorrectionMinDistanceSq) ||
     1 - Math.abs(car.visualCorrectionQuaternion.w) > 0.0001;
   if (!car.visualCorrectionActive) clearVisualCorrection(car);
 }
@@ -3265,11 +3287,19 @@ function applyCarVisualCorrection(car, dt) {
   car.visual.position.add(car.visualCorrectionPosition);
   car.visual.quaternion.premultiply(car.visualCorrectionQuaternion).normalize();
 
-  const decay = THREE.MathUtils.clamp(1 - Math.exp(-dt * visualCorrectionDecayRate), 0, 1);
+  const correctionSq = car.visualCorrectionPosition.lengthSq();
+  const decayRate = car === playerCar
+    ? correctionSq < 0.09
+      ? localSmallCorrectionDecayRate
+      : correctionSq < 1
+        ? localMediumCorrectionDecayRate
+        : visualCorrectionDecayRate
+    : visualCorrectionDecayRate;
+  const decay = THREE.MathUtils.clamp(1 - Math.exp(-dt * decayRate), 0, 1);
   car.visualCorrectionPosition.multiplyScalar(1 - decay);
   car.visualCorrectionQuaternion.slerp(visualCorrectionIdentityQuat, decay);
   if (
-    car.visualCorrectionPosition.lengthSq() <= visualCorrectionMinDistanceSq &&
+    car.visualCorrectionPosition.lengthSq() <= (car === playerCar ? localVisualCorrectionMinDistanceSq : visualCorrectionMinDistanceSq) &&
     1 - Math.abs(car.visualCorrectionQuaternion.w) <= 0.0001
   ) {
     clearVisualCorrection(car);
@@ -3429,10 +3459,11 @@ function cloneCurrentContinuousInputSnapshot() {
   return snapshot;
 }
 
-function recordPredictionInputSample(sequence, inputSnapshot, tickNow) {
+function recordPredictionInputSample(sequence, inputSnapshot, tickNow, targetTick = 0) {
   if (!multiplayerState.predictedRound || sequence <= 0) return;
   multiplayerState.predictionInputHistory.push({
     tickNow,
+    targetTick: Math.max(0, Math.floor(Number(targetTick) || 0)),
     sequence,
     input: cloneInputSnapshot(inputSnapshot),
   });
@@ -3554,7 +3585,7 @@ function requestRoomList({ force = false } = {}) {
 function sendNetworkPing({ force = false } = {}) {
   if (!multiplayerEnabled() || !multiplayerState.connected) return;
   const now = performance.now();
-  if (!force && now - multiplayerState.lastPingAt < 2000) return;
+  if (!force && now - multiplayerState.lastPingAt < networkPingIntervalMs) return;
   multiplayerState.lastPingAt = now;
   multiplayerState.pingSentAt = now;
   multiplayerState.pingSequence += 1;
@@ -3565,26 +3596,83 @@ function sendNetworkPing({ force = false } = {}) {
   });
 }
 
-function recordNetworkPong(message) {
-  const sentAt = Number(message.clientTime) || multiplayerState.pingSentAt;
-  const rtt = Math.max(0, performance.now() - sentAt);
-  if (Number.isFinite(multiplayerState.pingMs)) {
-    const instantJitter = Math.abs(rtt - multiplayerState.pingMs);
-    multiplayerState.jitterMs = Number.isFinite(multiplayerState.jitterMs)
-      ? multiplayerState.jitterMs * 0.82 + instantJitter * 0.18
-      : instantJitter;
-    multiplayerState.pingMs = multiplayerState.pingMs * 0.7 + rtt * 0.3;
-  } else {
-    multiplayerState.pingMs = rtt;
-    multiplayerState.jitterMs = 0;
+function resetNetworkLatencyStats() {
+  multiplayerState.pingMs = null;
+  multiplayerState.latestRttMs = null;
+  multiplayerState.jitterMs = null;
+  multiplayerState.pingSentAt = 0;
+  multiplayerState.lastPingAt = 0;
+  multiplayerState.lastPongAt = 0;
+  multiplayerState.rttSamples = [];
+  multiplayerState.pingDisplaySamples = [];
+}
+
+function pruneNetworkRttSamples(now = performance.now()) {
+  const oldest = now - rttSampleWindowMs;
+  while (multiplayerState.rttSamples.length && multiplayerState.rttSamples[0].at < oldest) {
+    multiplayerState.rttSamples.shift();
   }
+}
+
+function recordNetworkRttSample(rtt, now = performance.now()) {
+  if (!Number.isFinite(rtt) || rtt < 0 || rtt > maxValidRttMs) return false;
+  multiplayerState.latestRttMs = rtt;
+  multiplayerState.rttSamples.push({ at: now, rtt });
+  multiplayerState.pingDisplaySamples.push(rtt);
+  if (multiplayerState.pingDisplaySamples.length > pingDisplaySampleLimit) {
+    multiplayerState.pingDisplaySamples.shift();
+  }
+  pruneNetworkRttSamples(now);
+  return true;
+}
+
+function networkRttWindowStats(now = performance.now()) {
+  pruneNetworkRttSamples(now);
+  const samples = multiplayerState.rttSamples;
+  if (!samples.length) return { count: 0, min: null, avg: null, p95: null, max: null };
+  let min = Infinity;
+  let max = 0;
+  let sum = 0;
+  const values = [];
+  for (const sample of samples) {
+    min = Math.min(min, sample.rtt);
+    max = Math.max(max, sample.rtt);
+    sum += sample.rtt;
+    values.push(sample.rtt);
+  }
+  return { count: samples.length, min, avg: sum / samples.length, p95: percentileValue(values, 95), max };
+}
+
+function networkMedianPingMs() {
+  const samples = multiplayerState.pingDisplaySamples;
+  return samples.length ? percentileValue(samples, 50) : null;
+}
+
+function networkRecentJitterMs(median = networkMedianPingMs()) {
+  if (!Number.isFinite(median)) return null;
+  const deviations = multiplayerState.pingDisplaySamples.map((sample) => Math.abs(sample - median));
+  return deviations.length ? percentileValue(deviations, 50) : null;
+}
+
+function formatNetworkMs(value) {
+  return Number.isFinite(value) ? `${Math.round(value)} ms` : "--";
+}
+
+function recordNetworkPong(message) {
+  const now = performance.now();
+  const clientTime = Number(message.clientTime);
+  const sentAt = Number.isFinite(clientTime) ? clientTime : multiplayerState.pingSentAt;
+  const rtt = now - sentAt;
+  if (!recordNetworkRttSample(rtt, now)) return;
+  multiplayerState.pingMs = networkMedianPingMs();
+  multiplayerState.jitterMs = networkRecentJitterMs(multiplayerState.pingMs);
   if (Number.isFinite(message.serverTime)) {
     const measuredOffset = message.serverTime - (sentAt + rtt * 0.5);
     multiplayerState.serverClockOffsetMs = Number.isFinite(multiplayerState.serverClockOffsetMs)
       ? multiplayerState.serverClockOffsetMs * 0.85 + measuredOffset * 0.15
       : measuredOffset;
   }
-  multiplayerState.lastPongAt = performance.now();
+  multiplayerState.lastPongAt = now;
 }
 
 function averageSnapshotMs() {
@@ -3611,8 +3699,8 @@ function networkQualityLabel({ snapshotHz = null, lastSnapshotAgo = null, extrap
   ) {
     return "Fair";
   }
-  if (ping <= 80 && jitter <= 20) return "Good";
-  if (ping <= 140 && jitter <= 45) return "Fair";
+  if (ping <= 70 && jitter <= 15) return "Good";
+  if (ping <= 120 && jitter <= 35) return "Fair";
   return "Poor";
 }
 
@@ -3621,12 +3709,19 @@ function updateNetworkUi() {
   networkHudEl.classList.toggle("hidden", !show);
   if (!show) return;
 
-  const ping = Number.isFinite(multiplayerState.pingMs) ? Math.round(multiplayerState.pingMs) : null;
-  networkHudEl.textContent = ping === null ? "-- ms" : `${ping} ms`;
+  const ping = Number.isFinite(multiplayerState.pingMs) ? multiplayerState.pingMs : null;
+  networkHudEl.textContent = ping === null ? "-- ms" : formatNetworkMs(ping);
 
   const avgSnapshot = averageSnapshotMs();
   const snapshotHz = avgSnapshot ? 1000 / avgSnapshot : null;
   const lastSnapshotAgo = multiplayerState.lastSnapshotAt ? performance.now() - multiplayerState.lastSnapshotAt : null;
+  const rttStats = networkRttWindowStats();
+  const rttStatsText = rttStats.count
+    ? `${Math.round(rttStats.min)} / ${Math.round(rttStats.avg)} / ${Math.round(rttStats.max)} ms`
+    : "--";
+  const rttSpikeText = rttStats.count
+    ? `${Math.round(rttStats.p95)} / ${Math.round(rttStats.max)} ms`
+    : "--";
   const remoteStats = multiplayerState.remoteInterpolationStats;
   const now = performance.now();
   if (!remoteStats.lastUiSampleAt) remoteStats.lastUiSampleAt = now;
@@ -3640,8 +3735,11 @@ function updateNetworkUi() {
     : 0;
   pauseNetworkMetricsEl.innerHTML = `
     <span>Quality</span><strong>${networkQualityLabel({ snapshotHz, lastSnapshotAgo, extrapolationsPerSecond: remoteStats.extrapolationsPerSecond })}</strong>
-    <span>Ping</span><strong>${ping === null ? "--" : `${ping} ms`}</strong>
-    <span>Jitter</span><strong>${Number.isFinite(multiplayerState.jitterMs) ? `${Math.round(multiplayerState.jitterMs)} ms` : "--"}</strong>
+    <span>RTT Median</span><strong>${formatNetworkMs(ping)}</strong>
+    <span>RTT Instant</span><strong>${formatNetworkMs(multiplayerState.latestRttMs)}</strong>
+    <span>RTT 30s Min/Avg/Max</span><strong>${rttStatsText}</strong>
+    <span>RTT 30s P95/Max</span><strong>${rttSpikeText}</strong>
+    <span>Jitter</span><strong>${formatNetworkMs(multiplayerState.jitterMs)}</strong>
     <span>Snapshots</span><strong>${snapshotHz ? `${snapshotHz.toFixed(1)} Hz` : "--"}</strong>
     <span>Last Update</span><strong>${lastSnapshotAgo === null ? "--" : `${Math.round(lastSnapshotAgo)} ms`}</strong>
     <span>Input Ack</span><strong>${multiplayerState.acknowledgedInputSequence}</strong>
@@ -3884,6 +3982,10 @@ function sendLocalInput(force = false) {
     jumpQueued: playerCar.input.jumpQueued,
     airRoll: playerCar.input.airRoll,
   };
+  const targetTick = Math.max(
+    1,
+    Math.floor((sharedRound?.sim?.tick ?? 0) + 1),
+  );
   if (sharedRound?.sim && sessionId) {
     sharedRound.sim.inputs.set(sessionId, mergeSharedCannonInput(sharedRound.sim.inputs.get(sessionId), inputSnapshot));
   }
@@ -3894,16 +3996,20 @@ function sendLocalInput(force = false) {
   multiplayerState.lastInputSentAt = now;
   multiplayerState.inputSequence += 1;
   const sentSequence = multiplayerState.inputSequence;
-  if (sharedRound?.sim && sessionId) {
-    sharedRound.sim.inputSequences.set(sessionId, sentSequence);
-  }
+  if (sharedRound?.sim && sessionId) sharedRound.sim.inputSequences.set(sessionId, sentSequence);
   if (sendServerMessage({
     type: "input",
     roundId: multiplayerState.activeRoundId,
     sequence: sentSequence,
+    targetTick,
     input: inputSnapshot,
   })) {
-    recordPredictionInputSample(sentSequence, inputSnapshot, sharedRound?.clientTickNow ?? sharedRound?.sim?.lastTick ?? Date.now());
+    const nextInputTickNow = Math.max(
+      sharedRound?.playStartsAt ?? 0,
+      sharedRound?.sim?.lastTick ?? Date.now(),
+      (sharedRound?.clientTickNow ?? sharedRound?.sim?.lastTick ?? Date.now()) + fixedStep * 1000,
+    );
+    recordPredictionInputSample(sentSequence, inputSnapshot, nextInputTickNow, targetTick);
   }
 }
 
@@ -3964,6 +4070,7 @@ function setPredictedCarFromSnapshot(carSnapshot) {
   predictedCar.immunityRemaining = carSnapshot.immunityRemaining ?? predictedCar.immunityRemaining ?? 0;
   predictedCar.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? predictedCar.boostTimeRemaining ?? 0;
   predictedCar.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? predictedCar.boostCooldownRemaining ?? 0;
+  applyManualRightingSnapshot(predictedCar, carSnapshot);
 }
 
 function writeSharedCannonCarBodyState(car, sharedCar, { snap = false } = {}) {
@@ -3982,6 +4089,30 @@ function writeSharedCannonCarBodyState(car, sharedCar, { snap = false } = {}) {
       sharedCar.body.quaternion.z,
       sharedCar.body.quaternion.w,
     ],
+    manualRightingActive: sharedCar.manualRightingActive,
+    manualRightingElapsed: sharedCar.manualRightingElapsed,
+    manualRightingStartPosition: [
+      sharedCar.manualRightingStartPosition.x,
+      sharedCar.manualRightingStartPosition.y,
+      sharedCar.manualRightingStartPosition.z,
+    ],
+    manualRightingTargetPosition: [
+      sharedCar.manualRightingTargetPosition.x,
+      sharedCar.manualRightingTargetPosition.y,
+      sharedCar.manualRightingTargetPosition.z,
+    ],
+    manualRightingStartQuaternion: [
+      sharedCar.manualRightingStartQuaternion.x,
+      sharedCar.manualRightingStartQuaternion.y,
+      sharedCar.manualRightingStartQuaternion.z,
+      sharedCar.manualRightingStartQuaternion.w,
+    ],
+    manualRightingTargetQuaternion: [
+      sharedCar.manualRightingTargetQuaternion.x,
+      sharedCar.manualRightingTargetQuaternion.y,
+      sharedCar.manualRightingTargetQuaternion.z,
+      sharedCar.manualRightingTargetQuaternion.w,
+    ],
   }, { snap });
 }
 
@@ -3990,9 +4121,7 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
   const sessionId = multiplayerState.sessionId;
   if (!snapshot || !predictedRound?.sim || !sessionId) return;
 
-  const previousClientTickNow = Number.isFinite(predictedRound.clientTickNow)
-    ? predictedRound.clientTickNow
-    : predictedRound.sim.lastTick;
+  const previousClientSimTick = Number.isFinite(predictedRound.sim.tick) ? predictedRound.sim.tick : 0;
   const localSnapshot = snapshot.cars.find((carSnapshot) => carSnapshot.sessionId === sessionId);
   const predictedCar = localSnapshot ? predictedRound.sim.cars.get(localSnapshot.key) : null;
   const preserveLocalVisual = Boolean(localSnapshot && predictedCar && gameState.phase === "playing");
@@ -4015,51 +4144,52 @@ function rebuildPredictionFromServerSnapshot(snapshot) {
     predictedRound.playStartsAt,
     snapshot.simLastTick ?? snapshot.serverTime ?? Date.now(),
   );
-  const targetClientTickNow = Math.min(
-    Math.max(baseTickNow, previousClientTickNow ?? baseTickNow),
-    baseTickNow + maxPredictionReplayCatchupMs,
+  const baseSimTick = Math.max(0, Math.floor(Number(snapshot.simTick) || predictedRound.sim.tick || 0));
+  const targetClientSimTick = Math.min(
+    Math.max(baseSimTick, previousClientSimTick),
+    baseSimTick + maxPredictionReplayCatchupTicks,
   );
   for (const carSnapshot of snapshot.cars) {
     setPredictedCarFromSnapshot(carSnapshot);
   }
   predictedRound.sim.lastTick = baseTickNow;
   predictedRound.sim.accumulator = Math.max(0, Math.min(fixedStep, snapshot.simAccumulator ?? 0));
+  predictedRound.sim.tick = baseSimTick;
   predictedRound.clientTickNow = baseTickNow;
 
   const replaySamples = multiplayerState.predictionInputHistory
     .filter((sample) => sample.sequence > multiplayerState.acknowledgedInputSequence)
-    .sort((a, b) => a.sequence - b.sequence);
+    .sort((a, b) => (a.targetTick || 0) - (b.targetTick || 0) || a.sequence - b.sequence);
 
   let replayTickNow = baseTickNow;
   let latestReplayInput = cloneInputSnapshot(localSnapshot?.input ?? predictedRound.sim.inputs.get(sessionId));
   let latestReplaySequence = multiplayerState.acknowledgedInputSequence;
+  let latestReplayTargetTick = localSnapshot?.inputTick ?? 0;
   const currentContinuousInput = cloneCurrentContinuousInputSnapshot();
-  for (const sample of replaySamples) {
-    latestReplayInput = sample.input;
-    latestReplaySequence = sample.sequence;
+  let sampleIndex = 0;
+  while (predictedRound.sim.tick < targetClientSimTick) {
+    const nextSimTick = predictedRound.sim.tick + 1;
+    while (sampleIndex < replaySamples.length) {
+      const sample = replaySamples[sampleIndex];
+      const sampleTargetTick = Math.max(baseSimTick + 1, Math.floor(Number(sample.targetTick) || nextSimTick));
+      if (sampleTargetTick > nextSimTick) break;
+      latestReplayInput = sample.input;
+      latestReplaySequence = sample.sequence;
+      latestReplayTargetTick = sampleTargetTick;
+      sampleIndex += 1;
+    }
     predictedRound.sim.inputs.set(sessionId, latestReplayInput);
     predictedRound.sim.inputSequences.set(sessionId, latestReplaySequence);
-    replayTickNow = Math.min(
-      targetClientTickNow,
-      Math.max(replayTickNow + fixedStep * 1000, sample.tickNow),
-    );
+    predictedRound.sim.inputTargetTicks.set(sessionId, latestReplayTargetTick);
+    replayTickNow += fixedStep * 1000;
     tickSharedCannonSim(predictedRound, replayTickNow);
     predictedRound.clientTickNow = replayTickNow;
   }
   latestReplayInput = currentContinuousInput;
   predictedRound.sim.inputs.set(sessionId, latestReplayInput);
   predictedRound.sim.inputSequences.set(sessionId, latestReplaySequence);
-  while (replayTickNow + fixedStep * 1000 <= targetClientTickNow + 0.001) {
-    replayTickNow += fixedStep * 1000;
-    tickSharedCannonSim(predictedRound, replayTickNow);
-    predictedRound.clientTickNow = replayTickNow;
-  }
-  if (replayTickNow + 0.001 < targetClientTickNow) {
-    replayTickNow = targetClientTickNow;
-    tickSharedCannonSim(predictedRound, replayTickNow);
-    predictedRound.clientTickNow = replayTickNow;
-  }
-  multiplayerState.predictionStats.lastReplayCatchupMs = Math.max(0, replayTickNow - baseTickNow);
+  predictedRound.sim.inputTargetTicks.set(sessionId, latestReplayTargetTick);
+  multiplayerState.predictionStats.lastReplayCatchupMs = Math.max(0, (predictedRound.sim.tick - baseSimTick) * fixedStep * 1000);
   multiplayerState.predictionStats.maxReplayCatchupMs = Math.max(
     multiplayerState.predictionStats.maxReplayCatchupMs,
     multiplayerState.predictionStats.lastReplayCatchupMs,
@@ -4194,6 +4324,46 @@ function resetNetworkCars() {
   gameState.sharedSessionId = "solo";
 }
 
+function applyManualRightingSnapshot(car, snapshot = {}) {
+  if (!car || snapshot.manualRightingActive === undefined) return;
+  car.manualRightingActive = Boolean(snapshot.manualRightingActive);
+  car.manualRightingElapsed = Number(snapshot.manualRightingElapsed) || 0;
+  const startPosition = snapshot.manualRightingStartPosition;
+  if (Array.isArray(startPosition) && startPosition.length >= 3) {
+    car.manualRightingStartPosition.set(
+      Number(startPosition[0]) || 0,
+      Number(startPosition[1]) || 0,
+      Number(startPosition[2]) || 0,
+    );
+  }
+  const targetPosition = snapshot.manualRightingTargetPosition;
+  if (Array.isArray(targetPosition) && targetPosition.length >= 3) {
+    car.manualRightingTargetPosition.set(
+      Number(targetPosition[0]) || 0,
+      Number(targetPosition[1]) || 0,
+      Number(targetPosition[2]) || 0,
+    );
+  }
+  const startQuaternion = snapshot.manualRightingStartQuaternion;
+  if (Array.isArray(startQuaternion) && startQuaternion.length >= 4) {
+    car.manualRightingStartQuaternion.set(
+      Number(startQuaternion[0]) || 0,
+      Number(startQuaternion[1]) || 0,
+      Number(startQuaternion[2]) || 0,
+      Number(startQuaternion[3]) || 1,
+    );
+  }
+  const targetQuaternion = snapshot.manualRightingTargetQuaternion;
+  if (Array.isArray(targetQuaternion) && targetQuaternion.length >= 4) {
+    car.manualRightingTargetQuaternion.set(
+      Number(targetQuaternion[0]) || 0,
+      Number(targetQuaternion[1]) || 0,
+      Number(targetQuaternion[2]) || 0,
+      Number(targetQuaternion[3]) || 1,
+    );
+  }
+}
+
 function writeCarBodyState(car, snapshot, { snap = false } = {}) {
   car.body.previousPosition.copy(car.body.position);
   car.body.previousQuaternion.copy(car.body.quaternion);
@@ -4210,6 +4380,7 @@ function writeCarBodyState(car, snapshot, { snap = false } = {}) {
   car.body.quaternion.set(snapshot.quaternion[0], snapshot.quaternion[1], snapshot.quaternion[2], snapshot.quaternion[3]);
   car.manualRightingActive = false;
   car.manualRightingElapsed = 0;
+  applyManualRightingSnapshot(car, snapshot);
   clearVehicleInputs(car);
   if (snap) {
     car.body.previousPosition.copy(car.body.position);
@@ -4250,9 +4421,9 @@ function currentRemoteInterpolationDelay() {
   const jitter = Number.isFinite(multiplayerState.jitterMs) ? multiplayerState.jitterMs : 0;
   const ping = Number.isFinite(multiplayerState.pingMs) ? multiplayerState.pingMs : 100;
   const avgSnapshot = averageSnapshotMs();
-  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.45 : remoteInterpolationBaseDelayMs;
+  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 0.45 : remoteInterpolationBaseDelayMs;
   return THREE.MathUtils.clamp(
-    Math.max(remoteInterpolationBaseDelayMs, ping * 0.32 + cadenceDelay + jitter * 1.15),
+    Math.max(remoteInterpolationBaseDelayMs, ping * 0.1 + cadenceDelay + jitter * 0.4),
     remoteInterpolationMinDelayMs,
     remoteInterpolationMaxDelayMs,
   );
@@ -4389,6 +4560,13 @@ function applyServerSnapshot(snapshot) {
       input: entry[10],
       inputSequence: entry[11] ?? 0,
       sessionId: entry[12] ?? null,
+      inputTick: entry[13] ?? 0,
+      manualRightingActive: Boolean(entry[14]),
+      manualRightingElapsed: entry[15] ?? 0,
+      manualRightingStartPosition: entry[16],
+      manualRightingTargetPosition: entry[17],
+      manualRightingStartQuaternion: entry[18],
+      manualRightingTargetQuaternion: entry[19],
     }))
     : snapshot.cars;
   if (snapshot.compact) snapshot.cars = carSnapshots;
@@ -4674,6 +4852,7 @@ function connectMultiplayer(options = {}) {
   multiplayerState.socket = socket;
 
   socket.addEventListener("open", () => {
+    resetNetworkLatencyStats();
     multiplayerState.connected = true;
     multiplayerState.reconnectAttempts = 0;
     sendServerMessage({
@@ -4796,6 +4975,7 @@ function connectMultiplayer(options = {}) {
     multiplayerState.round = null;
     multiplayerState.activeRoundId = null;
     multiplayerState.roomCode = "";
+    resetNetworkLatencyStats();
     if (multiplayerState.socket === socket) multiplayerState.socket = null;
     lobbyStatusEl.textContent = "Disconnected";
     renderColorPicker();
@@ -4825,6 +5005,7 @@ function disconnectMultiplayer() {
   multiplayerState.activeRoundId = null;
   multiplayerState.lastResults = null;
   multiplayerState.createRoomOpen = false;
+  resetNetworkLatencyStats();
   renderColorPicker();
   renderMultiplayerLobby();
 }
@@ -6406,6 +6587,13 @@ window.__arenaCarDebug = {
         activeRoundId: multiplayerState.activeRoundId,
         acknowledgedInputSequence: multiplayerState.acknowledgedInputSequence,
         sentInputSequence: multiplayerState.inputSequence,
+        latency: {
+          rttInstantMs: multiplayerState.latestRttMs,
+          rttMedianMs: multiplayerState.pingMs,
+          jitterMs: multiplayerState.jitterMs,
+          rttWindowMs: networkRttWindowStats(),
+          lastPongAgeMs: multiplayerState.lastPongAt ? performance.now() - multiplayerState.lastPongAt : null,
+        },
         predictionStats: { ...multiplayerState.predictionStats },
         jitterStats: summarizeLocalJitterStats(),
         remoteInterpolationStats: {
@@ -6574,7 +6762,7 @@ renderColorPicker();
 renderMultiplayerLobby();
 updateMultiplayerControls();
 setInterval(renderMultiplayerLobby, 500);
-setInterval(sendNetworkPing, 2000);
+setInterval(sendNetworkPing, networkPingIntervalMs);
 setUiPhase("menu");
 spawnCarAt(playerCar, getArenaSpawnPoints()[0]);
 gameState.timeRemaining = Number(roundTimeSelect.value);

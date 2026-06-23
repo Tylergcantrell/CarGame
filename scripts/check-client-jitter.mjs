@@ -1,10 +1,13 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
 import { chromium } from "playwright-core";
+import WebSocket from "ws";
+import { protocolVersion } from "../server/shared/protocol.js";
 
 const port = Number(process.env.JITTER_PORT ?? 8817);
 const workerPortBase = Number(process.env.JITTER_WORKER_PORT_BASE ?? 21817);
 const url = `http://127.0.0.1:${port}`;
+const wsUrl = `ws://127.0.0.1:${port}`;
 const durationMs = Number(process.env.JITTER_DURATION_MS ?? 9000);
 const warmupMs = Number(process.env.JITTER_WARMUP_MS ?? 4500);
 
@@ -47,6 +50,60 @@ function percentile(values, pct) {
 
 function fixed(value, digits = 4) {
   return Number((Number(value) || 0).toFixed(digits));
+}
+
+function makeWsClient() {
+  const ws = new WebSocket(wsUrl);
+  const queue = [];
+  const waiters = [];
+  ws.on("message", (raw) => {
+    const message = JSON.parse(raw.toString());
+    const index = waiters.findIndex((entry) => entry.predicate(message));
+    if (index >= 0) {
+      const [entry] = waiters.splice(index, 1);
+      clearTimeout(entry.timeout);
+      entry.resolve(message);
+    } else {
+      queue.push(message);
+    }
+  });
+
+  function waitFor(predicate, timeoutMs = 10000) {
+    const index = queue.findIndex(predicate);
+    if (index >= 0) return Promise.resolve(queue.splice(index, 1)[0]);
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const waiterIndex = waiters.findIndex((entry) => entry.resolve === resolve);
+        if (waiterIndex >= 0) waiters.splice(waiterIndex, 1);
+        reject(new Error("websocket wait timeout"));
+      }, timeoutMs);
+      waiters.push({ predicate, resolve, timeout });
+    });
+  }
+
+  return { ws, waitFor };
+}
+
+async function connectGuest(roomCode) {
+  const client = makeWsClient();
+  await new Promise((resolve, reject) => {
+    client.ws.once("open", resolve);
+    client.ws.once("error", reject);
+  });
+  client.ws.send(JSON.stringify({
+    type: "hello",
+    protocolVersion,
+    name: "JitterGuest",
+    roomCode,
+  }));
+  const welcome = await client.waitFor((message) => message.type === "welcome");
+  const joined = await client.waitFor((message) => message.type === "joined" && message.roomCode === roomCode);
+  const state = await client.waitFor((message) => (
+    message.type === "state" &&
+    message.roomCode === roomCode &&
+    message.clients?.some((entry) => entry.sessionId === joined.sessionId)
+  ));
+  return { ...client, welcome, joined, state, sessionId: joined.sessionId };
 }
 
 function movementMetrics(samples, key) {
@@ -144,23 +201,51 @@ function summarize(samples, jitterStats = null) {
   };
 }
 
-async function createAndStartRound(host, guest) {
+async function createAndStartRound(host) {
   await host.goto(url, { waitUntil: "networkidle" });
+  await host.waitForFunction(() => Boolean(window.__arenaCarDebug?.getState), null, { timeout: 10000 });
+  await host.waitForSelector("#mode-multiplayer", { timeout: 10000 });
   await host.evaluate(() => document.querySelector("#mode-multiplayer")?.click());
-  await host.fill("#multiplayer-name", "JitterHost");
+  try {
+    await host.waitForFunction(() => document.body.dataset.gameMode === "multiplayer", null, { timeout: 10000 });
+  } catch (error) {
+    const diagnostics = await host.evaluate(() => ({
+      modeButton: document.querySelector("#mode-multiplayer")?.outerHTML,
+      bodyMode: document.body.dataset.gameMode,
+      state: window.__arenaCarDebug?.getState?.(),
+    }));
+    throw new Error(`multiplayer mode did not activate: ${JSON.stringify(diagnostics)}`);
+  }
+  try {
+    await host.waitForFunction(() => (
+      window.__arenaCarDebug?.getState?.().multiplayer.connected ||
+      document.querySelector("#lobby-status")?.textContent?.includes("Online") ||
+      document.querySelector("#connection-pill")?.textContent?.includes("Online")
+    ), null, { timeout: 10000 });
+  } catch (error) {
+    const diagnostics = await host.evaluate(() => ({
+      injectedUrl: window.CARTAG_MULTIPLAYER_URL,
+      phase: window.__arenaCarDebug?.getState?.().phase,
+      multiplayer: window.__arenaCarDebug?.getState?.().multiplayer,
+      bodyMode: document.body.dataset.gameMode,
+      lobbyStatus: document.querySelector("#lobby-status")?.textContent,
+      connection: document.querySelector("#connection-pill")?.textContent,
+    }));
+    throw new Error(`host did not connect: ${JSON.stringify(diagnostics)}`);
+  }
+  await host.evaluate(() => {
+    const input = document.querySelector("#multiplayer-name");
+    if (!input) return;
+    input.value = "JitterHost";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
   await host.evaluate(() => document.querySelector("#create-room-open")?.click());
+  await host.waitForFunction(() => !document.querySelector("#create-room-panel")?.classList?.contains("hidden"), null, { timeout: 10000 });
   await host.evaluate(() => document.querySelector("#create-room")?.click());
-  await host.waitForFunction(() => document.querySelector("#room-summary")?.textContent?.includes("Room"), null, { timeout: 10000 });
+  await host.waitForFunction(() => Boolean(window.__arenaCarDebug?.getState().multiplayer.roomCode), null, { timeout: 10000 });
   const code = await host.evaluate(() => window.__arenaCarDebug.getState().multiplayer.roomCode);
-
-  await guest.goto(url, { waitUntil: "networkidle" });
-  await guest.evaluate(() => document.querySelector("#mode-multiplayer")?.click());
-  await guest.fill("#multiplayer-name", "JitterGuest");
-  await guest.evaluate(() => document.querySelector("#refresh-rooms")?.click());
-  const row = guest.locator(".room-row").filter({ hasText: code }).first();
-  await row.waitFor({ timeout: 10000 });
-  await row.locator("button").click({ force: true });
-  await guest.waitForFunction(() => document.querySelector("#room-summary")?.textContent?.includes("Room"), null, { timeout: 10000 });
+  const guest = await connectGuest(code);
   await host.waitForFunction(() => document.querySelector("#lobby-list")?.textContent?.includes("JitterGuest"), null, { timeout: 10000 });
   await host.waitForFunction(() => {
     const button = document.querySelector("#start-round");
@@ -192,7 +277,7 @@ async function createAndStartRound(host, guest) {
     }
     throw new Error(`round did not reach playing: ${JSON.stringify(diagnostics)}`);
   }
-  return { code };
+  return { code, guest };
 }
 
 async function sampleLocalPlayer(page) {
@@ -253,27 +338,38 @@ const server = spawn(process.execPath, ["server/game-server.mjs"], {
 });
 
 let browser;
+let guest;
 try {
   await waitForHealth();
   browser = await chromium.launch({
     executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
     headless: process.env.JITTER_HEADLESS !== "0",
     args: [
-      "--use-angle=swiftshader",
+      ...(process.env.JITTER_SWIFTSHADER === "1" ? ["--use-angle=swiftshader"] : []),
       "--disable-background-timer-throttling",
       "--disable-renderer-backgrounding",
     ],
   });
 
   const hostContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
-  const guestContext = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
+  await hostContext.addInitScript((targetWsUrl) => {
+    window.CARTAG_MULTIPLAYER_URL = targetWsUrl;
+  }, wsUrl);
   const host = await hostContext.newPage();
-  const guest = await guestContext.newPage();
-  await createAndStartRound(host, guest);
+  host.on("console", (message) => {
+    if (["error", "warning"].includes(message.type())) {
+      console.error(`[browser:${message.type()}] ${message.text()}`);
+    }
+  });
+  host.on("pageerror", (error) => {
+    console.error(`[browser:pageerror] ${error.stack ?? error.message}`);
+  });
+  ({ guest } = await createAndStartRound(host));
   const { samples, jitterStats } = await sampleLocalPlayer(host);
   const summary = summarize(samples, jitterStats);
   console.log(JSON.stringify({ ok: true, url, ...summary }, null, 2));
 } finally {
+  if (guest) guest.ws.close();
   if (browser) await browser.close();
   server.kill("SIGTERM");
 }

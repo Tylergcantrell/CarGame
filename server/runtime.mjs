@@ -12,7 +12,7 @@ import {
   clampInput,
   createSimState,
   makeSnapshot as makeSimSnapshot,
-  mergeInput,
+  queueInputForSession,
   tickSim,
 } from "./shared/cannon-multiplayer-sim.js";
 import { aiDifficultyIds, normalizeAiDifficulty } from "./shared/ai.js";
@@ -555,10 +555,17 @@ function publicSnapshotForClient(snapshot, client) {
         immunityRemaining: car.immunityRemaining,
         boostTimeRemaining: car.boostTimeRemaining,
         boostCooldownRemaining: car.boostCooldownRemaining,
+        manualRightingActive: car.manualRightingActive,
+        manualRightingElapsed: car.manualRightingElapsed,
+        manualRightingStartPosition: car.manualRightingStartPosition,
+        manualRightingTargetPosition: car.manualRightingTargetPosition,
+        manualRightingStartQuaternion: car.manualRightingStartQuaternion,
+        manualRightingTargetQuaternion: car.manualRightingTargetQuaternion,
         input: car.input,
         ...(isSelf ? {
           sessionId: car.sessionId,
           inputSequence: car.inputSequence,
+          inputTick: car.inputTick,
         } : {}),
       };
     }),
@@ -572,6 +579,7 @@ function compactSnapshotForClient(snapshot, client) {
     roomCode: snapshot.roomCode,
     roundId: snapshot.roundId,
     serverTime: snapshot.serverTime,
+    simTick: snapshot.simTick,
     simLastTick: snapshot.simLastTick,
     simAccumulator: snapshot.simAccumulator,
     remainingMs: snapshot.remainingMs,
@@ -589,10 +597,16 @@ function compactSnapshotForClient(snapshot, client) {
         car.boostTimeRemaining,
         car.boostCooldownRemaining,
         car.input,
+        car.sessionId === client.sessionId ? car.inputSequence : 0,
+        car.sessionId === client.sessionId ? car.sessionId : null,
+        car.sessionId === client.sessionId ? car.inputTick : 0,
+        car.manualRightingActive ? 1 : 0,
+        car.manualRightingElapsed,
+        car.manualRightingStartPosition,
+        car.manualRightingTargetPosition,
+        car.manualRightingStartQuaternion,
+        car.manualRightingTargetQuaternion,
       ];
-      if (car.sessionId === client.sessionId) {
-        entry.push(car.inputSequence, car.sessionId);
-      }
       return entry;
     }),
   };
@@ -663,7 +677,9 @@ function detachRoundPlayerSlot(room, slot) {
   slot.clientId = null;
   if (slot.sessionId) {
     room.activeRound.sim?.inputs.delete(slot.sessionId);
+    room.activeRound.sim?.inputBuffers.delete(slot.sessionId);
     room.activeRound.sim?.inputSequences.delete(slot.sessionId);
+    room.activeRound.sim?.inputTargetTicks.delete(slot.sessionId);
     room.activeRound.sim?.inputTimes.delete(slot.sessionId);
   }
 
@@ -1086,10 +1102,13 @@ function handleMessage(client, raw) {
       rejectMessage(client, "input_sequence_jump");
       return;
     }
+    const targetTick = Math.max(0, Math.floor(Number(message.targetTick) || round.sim.tick + 1));
     metrics.inputs += 1;
-    round.sim.inputs.set(client.sessionId, mergeInput(round.sim.inputs.get(client.sessionId), message.input));
-    round.sim.inputSequences.set(client.sessionId, sequence);
-    round.sim.inputTimes.set(client.sessionId, nowMs());
+    queueInputForSession(round.sim, client.sessionId, message.input, {
+      sequence,
+      targetTick,
+      receivedAt: nowMs(),
+    });
     return;
   }
 

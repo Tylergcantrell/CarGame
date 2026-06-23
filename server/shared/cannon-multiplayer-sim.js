@@ -14,8 +14,10 @@ import {
 
 export const arenaIds = Object.keys(arenaDefinitions);
 
-const fixedStep = 1 / 90;
+export const simFixedStep = 1 / 90;
+const fixedStep = simFixedStep;
 const maxCatchupSteps = 8;
+const maxInputBufferEntries = 48;
 const collisionGroups = {
   arena: 1,
   car: 2,
@@ -444,6 +446,46 @@ function makeInputState() {
     jumpQueued: false,
     airRoll: 0,
   };
+}
+
+export function queueInputForSession(sim, sessionId, input, {
+  sequence = 0,
+  targetTick = null,
+  receivedAt = Date.now(),
+} = {}) {
+  if (!sim || !sessionId) return false;
+  const cleanSequence = Math.max(0, Math.floor(Number(sequence) || 0));
+  const cleanTargetTick = Math.max(0, Math.floor(Number(targetTick) || sim.tick + 1));
+  const previousSequence = sim.inputSequences.get(sessionId) ?? 0;
+  if (cleanSequence < previousSequence) return false;
+
+  const buffer = sim.inputBuffers.get(sessionId) ?? [];
+  buffer.push({
+    sequence: cleanSequence,
+    targetTick: cleanTargetTick,
+    input: clampInput(input),
+  });
+  buffer.sort((a, b) => a.targetTick - b.targetTick || a.sequence - b.sequence);
+  while (buffer.length > maxInputBufferEntries) buffer.shift();
+  sim.inputBuffers.set(sessionId, buffer);
+  sim.inputTimes.set(sessionId, receivedAt);
+  return true;
+}
+
+function applyBufferedInputForSession(sim, sessionId, tick) {
+  const buffer = sim.inputBuffers.get(sessionId);
+  if (!buffer?.length) return;
+  let applied = null;
+  while (buffer.length && buffer[0].targetTick <= tick) {
+    const next = buffer.shift();
+    const previousSequence = sim.inputSequences.get(sessionId) ?? 0;
+    if (next.sequence >= previousSequence) applied = next;
+  }
+  if (!buffer.length) sim.inputBuffers.delete(sessionId);
+  if (!applied) return;
+  sim.inputs.set(sessionId, mergeInput(sim.inputs.get(sessionId), applied.input));
+  sim.inputSequences.set(sessionId, applied.sequence);
+  sim.inputTargetTicks.set(sessionId, applied.targetTick);
 }
 
 function createCar(world, materials, slot, rng = Math.random) {
@@ -1076,11 +1118,13 @@ function processContacts(round, cars) {
 
 function stepRound(round) {
   const sim = round.sim;
+  const nextTick = sim.tick + 1;
   const cars = [...sim.cars.values()];
   const itCar = cars.find((car) => car.isIt) ?? null;
   const aiGameState = { phase: "playing", cars, itCar };
   for (const car of cars) {
     if (car.slot.type === "player") {
+      applyBufferedInputForSession(sim, car.slot.sessionId, nextTick);
       const storedInput = playerInputIsFresh(sim, car.slot.sessionId)
         ? sim.inputs.get(car.slot.sessionId)
         : undefined;
@@ -1150,7 +1194,9 @@ export function createSimState(round, { now = Date.now(), rng = null } = {}) {
     physics,
     cars,
     inputs: new Map(),
+    inputBuffers: new Map(),
     inputSequences: new Map(),
+    inputTargetTicks: new Map(),
     inputTimes: new Map(),
     rng: simRng,
     lastTick: now,
@@ -1190,6 +1236,7 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
     roomCode,
     roundId: round.id,
     serverTime: now,
+    simTick: round.sim.tick,
     simLastTick: round.sim.lastTick,
     simAccumulator: round.sim.accumulator,
     remainingMs,
@@ -1208,7 +1255,32 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
         immunityRemaining: car.immunityRemaining,
         boostTimeRemaining: car.boostTimeRemaining,
         boostCooldownRemaining: car.boostCooldownRemaining,
+        manualRightingActive: car.manualRightingActive,
+        manualRightingElapsed: car.manualRightingElapsed,
+        manualRightingStartPosition: [
+          car.manualRightingStartPosition.x,
+          car.manualRightingStartPosition.y,
+          car.manualRightingStartPosition.z,
+        ],
+        manualRightingTargetPosition: [
+          car.manualRightingTargetPosition.x,
+          car.manualRightingTargetPosition.y,
+          car.manualRightingTargetPosition.z,
+        ],
+        manualRightingStartQuaternion: [
+          car.manualRightingStartQuaternion.x,
+          car.manualRightingStartQuaternion.y,
+          car.manualRightingStartQuaternion.z,
+          car.manualRightingStartQuaternion.w,
+        ],
+        manualRightingTargetQuaternion: [
+          car.manualRightingTargetQuaternion.x,
+          car.manualRightingTargetQuaternion.y,
+          car.manualRightingTargetQuaternion.z,
+          car.manualRightingTargetQuaternion.w,
+        ],
         inputSequence: slot.sessionId ? (round.sim.inputSequences.get(slot.sessionId) ?? 0) : 0,
+        inputTick: slot.sessionId ? (round.sim.inputTargetTicks.get(slot.sessionId) ?? 0) : 0,
         input: clampInput(car.input),
       };
     }),
