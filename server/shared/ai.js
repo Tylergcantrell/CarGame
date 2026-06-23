@@ -7,46 +7,69 @@ const tmpVec3C = new THREE.Vector3();
 const tmpVec3D = new THREE.Vector3();
 const tmpVec3E = new THREE.Vector3();
 const tmpVec3F = new THREE.Vector3();
+const tmpVec3G = new THREE.Vector3();
+const tmpVec3H = new THREE.Vector3();
+const tmpVec3I = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 
 export const aiDifficultyPresets = {
   easy: {
-    decisionScale: 1.55,
-    chaseSkill: 0.62,
-    escapeSkill: 0.66,
-    predictionScale: 0.56,
-    boostDiscipline: 0.48,
-    tacticalSkill: 0.5,
-    mistakeChance: 0.36,
-    mistakeDuration: [0.28, 0.68],
+    decisionScale: 1.35,
+    modeCommitment: 1.22,
+    chaseSkill: 0.72,
+    escapeSkill: 0.76,
+    predictionScale: 0.68,
+    boostDiscipline: 0.58,
+    tacticalSkill: 0.62,
+    cutoffSkill: 0.42,
+    jukeSkill: 0.5,
+    routeSkill: 0.42,
+    antiExploitSkill: 0.45,
+    mistakeChance: 0.24,
+    mistakeDuration: [0.22, 0.54],
   },
   medium: {
     decisionScale: 1,
+    modeCommitment: 1,
     chaseSkill: 1,
     escapeSkill: 1,
     predictionScale: 1,
     boostDiscipline: 1,
     tacticalSkill: 1,
+    cutoffSkill: 0.88,
+    jukeSkill: 0.88,
+    routeSkill: 0.86,
+    antiExploitSkill: 0.82,
     mistakeChance: 0.08,
     mistakeDuration: [0.12, 0.28],
   },
   hard: {
-    decisionScale: 0.68,
+    decisionScale: 0.58,
+    modeCommitment: 0.86,
     chaseSkill: 1.3,
     escapeSkill: 1.23,
     predictionScale: 1.24,
     boostDiscipline: 1.32,
     tacticalSkill: 1.25,
+    cutoffSkill: 1.34,
+    jukeSkill: 1.24,
+    routeSkill: 1.24,
+    antiExploitSkill: 1.2,
     mistakeChance: 0.024,
     mistakeDuration: [0.08, 0.18],
   },
   extreme: {
-    decisionScale: 0.38,
+    decisionScale: 0.34,
+    modeCommitment: 0.72,
     chaseSkill: 1.85,
     escapeSkill: 1.68,
     predictionScale: 1.72,
     boostDiscipline: 1.9,
     tacticalSkill: 1.65,
+    cutoffSkill: 1.9,
+    jukeSkill: 1.72,
+    routeSkill: 1.7,
+    antiExploitSkill: 1.65,
     mistakeChance: 0.001,
     mistakeDuration: [0.03, 0.06],
   },
@@ -72,6 +95,12 @@ const aiPersonalities = [
     persistence: 1.15,
     sabotage: 0.68,
     featureAwareness: 0.86,
+    directBias: 1.28,
+    cutoffBias: 1.08,
+    baitBias: 0.54,
+    jukeBias: 0.72,
+    routeBias: 0.8,
+    unpredictability: 0.48,
   },
   {
     key: "survivor",
@@ -90,6 +119,12 @@ const aiPersonalities = [
     persistence: 0.88,
     sabotage: 0.22,
     featureAwareness: 0.72,
+    directBias: 0.68,
+    cutoffBias: 0.72,
+    baitBias: 0.32,
+    jukeBias: 1.12,
+    routeBias: 1.26,
+    unpredictability: 0.42,
   },
   {
     key: "baiter",
@@ -108,6 +143,12 @@ const aiPersonalities = [
     persistence: 1.02,
     sabotage: 1.32,
     featureAwareness: 1.18,
+    directBias: 0.78,
+    cutoffBias: 0.94,
+    baitBias: 1.62,
+    jukeBias: 1.2,
+    routeBias: 0.9,
+    unpredictability: 0.82,
   },
   {
     key: "opportunist",
@@ -126,6 +167,12 @@ const aiPersonalities = [
     persistence: 0.82,
     sabotage: 1.08,
     featureAwareness: 1.04,
+    directBias: 0.92,
+    cutoffBias: 1.28,
+    baitBias: 1.08,
+    jukeBias: 0.96,
+    routeBias: 1.02,
+    unpredictability: 0.62,
   },
   {
     key: "drifter",
@@ -144,6 +191,12 @@ const aiPersonalities = [
     persistence: 1.28,
     sabotage: 0.9,
     featureAwareness: 1.38,
+    directBias: 0.74,
+    cutoffBias: 1.18,
+    baitBias: 0.82,
+    jukeBias: 0.88,
+    routeBias: 1.62,
+    unpredictability: 0.7,
   },
   {
     key: "scrambler",
@@ -162,6 +215,12 @@ const aiPersonalities = [
     persistence: 0.72,
     sabotage: 1.18,
     featureAwareness: 0.95,
+    directBias: 0.86,
+    cutoffBias: 0.9,
+    baitBias: 1.08,
+    jukeBias: 1.54,
+    routeBias: 0.86,
+    unpredictability: 1.28,
   },
 ];
 
@@ -199,6 +258,16 @@ function ensureAiMind(car, rng = Math.random) {
   car.ai.mistakeSteer ??= 0;
   car.ai.feintTimer ??= 0;
   car.ai.feintSign ??= rng() < 0.5 ? -1 : 1;
+  car.ai.mode ??= "wander";
+  car.ai.modeTimer ??= 0;
+  car.ai.modeSeed ??= rng();
+  car.ai.modeTargetId ??= null;
+  car.ai.lastThreatDistance ??= Infinity;
+  car.ai.lastTargetDistance ??= Infinity;
+  car.ai.pressure ??= 0;
+  car.ai.trickCooldown ??= 0;
+  car.ai.lastAimAngle ??= 0;
+  car.ai.lastBehaviorChangeAt ??= 0;
   return personalityByKey(car.ai.personalityKey);
 }
 
@@ -245,6 +314,187 @@ function clampArenaVector(vec, maxRadius = worldSpec.floorRadius - 9) {
   const radius = Math.hypot(vec.x, vec.z);
   if (radius > maxRadius) vec.multiplyScalar(maxRadius / radius);
   return vec;
+}
+
+function safeNormalize(vec, fallback = null) {
+  if (vec.lengthSq() > 0.0001) return vec.normalize();
+  return fallback ? vec.copy(fallback) : vec.set(0, 0, 1);
+}
+
+function flatSpeed(car) {
+  return Math.hypot(car.body.velocity.x, car.body.velocity.z);
+}
+
+function flatForward(car, out = new THREE.Vector3()) {
+  tmpQuat.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  out.set(0, 0, 1).applyQuaternion(tmpQuat);
+  out.y = 0;
+  return safeNormalize(out);
+}
+
+function flatDirectionBetween(from, to, out = new THREE.Vector3()) {
+  out.set(to.body.position.x - from.body.position.x, 0, to.body.position.z - from.body.position.z);
+  return safeNormalize(out);
+}
+
+function flatClosingSpeed(chaser, target) {
+  const direction = flatDirectionBetween(chaser, target, tmpVec3G);
+  return (
+    (chaser.body.velocity.x - target.body.velocity.x) * direction.x +
+    (chaser.body.velocity.z - target.body.velocity.z) * direction.z
+  );
+}
+
+function wallPressureForCar(car, margin = 30) {
+  const radius = Math.hypot(car.body.position.x, car.body.position.z);
+  return THREE.MathUtils.clamp((radius - (worldSpec.floorRadius - margin)) / Math.max(1, margin), 0, 1);
+}
+
+function targetEscapeLane(car, target, out = new THREE.Vector3()) {
+  const away = out.set(
+    target.body.position.x - car.body.position.x,
+    0,
+    target.body.position.z - car.body.position.z,
+  );
+  safeNormalize(away);
+  const targetRadius = Math.hypot(target.body.position.x, target.body.position.z);
+  if (targetRadius > worldSpec.floorRadius - 34) {
+    const center = tmpVec3H.set(-target.body.position.x, 0, -target.body.position.z);
+    safeNormalize(center);
+    away.lerp(center, THREE.MathUtils.clamp((targetRadius - (worldSpec.floorRadius - 34)) / 24, 0, 0.82));
+    safeNormalize(away);
+  }
+  return away;
+}
+
+function trafficPressureAround(car, gameState, radius = 18) {
+  let pressure = 0;
+  for (const other of gameState.cars) {
+    if (other === car) continue;
+    const distance = flatDistanceBetween(car, other);
+    if (distance > radius) continue;
+    pressure += (radius - distance) / radius;
+  }
+  return pressure;
+}
+
+function hasUsefulFeatureRoute(car, target, arenaId, mode, personality, difficulty) {
+  return featureTacticalVector(car, target, arenaId, mode, personality, difficulty, tmpVec3I);
+}
+
+function modeDuration(base, rng, difficulty, personality) {
+  const commitment = difficulty.modeCommitment ?? 1;
+  const variation = 0.76 + rng() * 0.54 + personality.unpredictability * 0.08;
+  return base * commitment * variation;
+}
+
+function setAiMode(car, mode, target = null, duration = 0.8, rng = Math.random, difficulty = aiDifficultyPresets.medium, personality = aiPersonalities[0]) {
+  if (car.ai.mode === mode && car.ai.modeTargetId === (target?.id ?? null) && car.ai.modeTimer > 0) return;
+  car.ai.mode = mode;
+  car.ai.modeTargetId = target?.id ?? null;
+  car.ai.modeTimer = modeDuration(duration, rng, difficulty, personality);
+  car.ai.modeSeed = rng();
+  car.ai.objectiveTimer = 0;
+}
+
+function scoreWithNoise(score, rng, personality, difficulty) {
+  const antiExploit = Math.max(0.35, difficulty.antiExploitSkill ?? 1);
+  const noise = (rng() - 0.5) * personality.unpredictability * 1.15 / antiExploit;
+  return score + noise;
+}
+
+function chooseChaseMode(car, target, rng, personality, difficulty, arenaId) {
+  const distance = flatDistanceBetween(car, target);
+  const targetSpeed = flatSpeed(target);
+  const closing = flatClosingSpeed(car, target);
+  const wallPressure = wallPressureForCar(target, 36);
+  const cutoffSkill = difficulty.cutoffSkill ?? 1;
+  const routeSkill = difficulty.routeSkill ?? 1;
+
+  if (distance < 10) return "chase_direct";
+  if (wallPressure > 0.56 && distance < 46) return "chase_trap_wall";
+
+  let bestMode = "chase_direct";
+  let bestScore = scoreWithNoise(
+    personality.directBias * (1.1 + Math.max(0, closing) * 0.025) + (distance < 28 ? 0.45 : 0),
+    rng,
+    personality,
+    difficulty,
+  );
+
+  const cutoffScore = scoreWithNoise(
+    personality.cutoffBias * cutoffSkill * (0.72 + targetSpeed * 0.035 + distance * 0.006 + wallPressure * 0.58),
+    rng,
+    personality,
+    difficulty,
+  );
+  if (cutoffScore > bestScore) {
+    bestScore = cutoffScore;
+    bestMode = "chase_cutoff";
+  }
+
+  if (hasUsefulFeatureRoute(car, target, arenaId, "chase", personality, difficulty)) {
+    const featureScore = scoreWithNoise(
+      personality.routeBias * personality.featureAwareness * routeSkill * (0.72 + Math.min(distance, 54) * 0.008),
+      rng,
+      personality,
+      difficulty,
+    );
+    if (featureScore > bestScore) bestMode = "chase_feature";
+  }
+
+  return bestMode;
+}
+
+function chooseEscapeMode(car, threat, gameState, rng, personality, difficulty, arenaId) {
+  const distance = flatDistanceBetween(car, threat);
+  const closing = flatClosingSpeed(threat, car);
+  const wallPressure = wallPressureForCar(car, 34);
+  const traffic = trafficPressureAround(car, gameState, 18);
+  const jukeSkill = difficulty.jukeSkill ?? 1;
+
+  if (distance < 13 && closing > -2) return "flee_juke";
+  if (wallPressure > 0.48) return "flee_open_space";
+
+  let bestMode = "flee_open_space";
+  let bestScore = scoreWithNoise(
+    personality.openSpaceBias * (0.9 + wallPressure * 0.5 + Math.max(0, closing) * 0.025),
+    rng,
+    personality,
+    difficulty,
+  );
+
+  const jukeScore = scoreWithNoise(
+    personality.jukeBias * jukeSkill * (0.42 + Math.max(0, 42 - distance) * 0.018 + Math.max(0, closing) * 0.035),
+    rng,
+    personality,
+    difficulty,
+  );
+  if (jukeScore > bestScore) {
+    bestScore = jukeScore;
+    bestMode = "flee_juke";
+  }
+
+  const baitTarget = chooseSabotageTarget(car, threat, gameState, personality, difficulty);
+  if (baitTarget) {
+    const baitScore = scoreWithNoise(personality.baitBias * personality.sabotage * (0.85 + traffic * 0.18), rng, personality, difficulty);
+    if (baitScore > bestScore) {
+      bestScore = baitScore;
+      bestMode = "flee_bait";
+    }
+  }
+
+  if (hasUsefulFeatureRoute(car, threat, arenaId, "escape", personality, difficulty)) {
+    const featureScore = scoreWithNoise(
+      personality.routeBias * personality.featureAwareness * (difficulty.routeSkill ?? 1) * (0.68 + Math.max(0, 66 - distance) * 0.008),
+      rng,
+      personality,
+      difficulty,
+    );
+    if (featureScore > bestScore) bestMode = "flee_feature";
+  }
+
+  return bestMode;
 }
 
 function closestTagTargetFor(car, gameState, personality, difficulty) {
@@ -310,18 +560,45 @@ function updateAiObjective(car, targetPoint, dt, refreshDistance = 10, rng = Mat
   }
 }
 
-function chooseAiChaseVector(car, target, desired, arenaContactForPoint, personality, difficulty) {
+function chooseAiChaseVector(car, target, desired, arenaContactForPoint, personality, difficulty, mode = "chase_direct", arenaId = "orange") {
   const carPos = worldCarPosition(car, tmpVec3A);
   const targetPos = worldCarPosition(target, tmpVec3B);
   const targetVelocity = worldCarVelocity(target, tmpVec3C);
   const distance = carPos.distanceTo(targetPos);
   const targetSpeed = targetVelocity.length();
+  const chaseSkill = difficulty.chaseSkill ?? 1;
+  const cutoffSkill = difficulty.cutoffSkill ?? 1;
   const predictTime = THREE.MathUtils.clamp(
-    distance / (22 + targetSpeed * 0.95),
+    distance / (21 + targetSpeed * 0.88 + flatSpeed(car) * 0.34),
     distance < 16 ? 0.06 : 0.18,
-    0.9,
+    mode === "chase_direct" ? 0.82 : 1.16,
   ) * (difficulty.predictionScale ?? 1) * THREE.MathUtils.lerp(0.86, 1.12, personality.chaseAggression - 0.8);
-  desired.copy(targetPos).addScaledVector(targetVelocity, predictTime).sub(carPos);
+  const leadPoint = tmpVec3D.copy(targetPos).addScaledVector(targetVelocity, predictTime);
+
+  if (mode === "chase_cutoff" || mode === "chase_trap_wall") {
+    const escapeLane = targetEscapeLane(car, target, tmpVec3E);
+    const lateral = tmpVec3F.set(-escapeLane.z, 0, escapeLane.x);
+    const carToTarget = tmpVec3G.copy(targetPos).sub(carPos);
+    carToTarget.y = 0;
+    const lateralSign = Math.sign(lateral.dot(carToTarget)) || car.ai.lateralSign || 1;
+    const cutoffDistance = THREE.MathUtils.clamp(distance * (0.22 + cutoffSkill * 0.08), 5, mode === "chase_trap_wall" ? 20 : 16);
+    leadPoint
+      .addScaledVector(escapeLane, cutoffDistance)
+      .addScaledVector(lateral, lateralSign * THREE.MathUtils.clamp(distance * 0.07, 2, 7));
+
+    const targetRadius = Math.hypot(target.body.position.x, target.body.position.z);
+    if (mode === "chase_trap_wall" || targetRadius > worldSpec.floorRadius - 30) {
+      const center = tmpVec3H.set(-target.body.position.x, 0, -target.body.position.z);
+      safeNormalize(center);
+      leadPoint.addScaledVector(center, 5 + cutoffSkill * 4);
+    }
+  }
+
+  desired.copy(leadPoint).sub(carPos);
+
+  if (mode === "chase_feature" && featureTacticalVector(car, target, arenaId, "chase", personality, difficulty, tmpVec3I)) {
+    desired.lerp(tmpVec3I, THREE.MathUtils.clamp(0.38 + personality.routeBias * 0.12 * chaseSkill, 0.28, 0.68));
+  }
 
   const contact = arenaContactForPoint(carPos);
   const surfaceComponent = desired.dot(contact.normal);
@@ -333,7 +610,7 @@ function chooseAiChaseVector(car, target, desired, arenaContactForPoint, persona
   }
 }
 
-function chooseAiEscapeVector(car, threat, desired, dt, gameState, rng = Math.random, personality, difficulty) {
+function chooseAiEscapeVector(car, threat, desired, dt, gameState, rng = Math.random, personality, difficulty, mode = "flee_open_space", arenaId = "orange") {
   const pos = flatCarPosition(car, tmpVec3A);
   const threatPos = flatCarPosition(threat, tmpVec3B);
   const threatVelocity = flatCarVelocity(threat, tmpVec3C);
@@ -342,6 +619,7 @@ function chooseAiEscapeVector(car, threat, desired, dt, gameState, rng = Math.ra
   awayDirection.multiplyScalar(1 / threatDistance);
   const urgency = THREE.MathUtils.clamp((72 - threatDistance) / 72, 0.28, 1);
   const tangent = tmpVec3E.set(-awayDirection.z, 0, awayDirection.x).multiplyScalar(car.ai.lateralSign);
+  const closingSpeed = threatVelocity.dot(awayDirection);
 
   const safePoint = car.ai.tacticalPoint
     .copy(pos)
@@ -349,8 +627,33 @@ function chooseAiEscapeVector(car, threat, desired, dt, gameState, rng = Math.ra
     .addScaledVector(tangent, (16 + urgency * 16) * personality.openSpaceBias);
 
   if (threatVelocity.lengthSq() > 0.01) {
-    const closingSpeed = threatVelocity.dot(awayDirection);
     if (closingSpeed > 2) safePoint.addScaledVector(tangent, 14 * personality.escapeAggression);
+  }
+
+  if (mode === "flee_juke") {
+    const threatForward = flatForward(threat, tmpVec3F);
+    const crossSign = Math.sign(threatForward.x * awayDirection.z - threatForward.z * awayDirection.x) || car.ai.feintSign || 1;
+    const jukeSign = car.ai.modeSeed > 0.52 ? -crossSign : crossSign;
+    const juke = tmpVec3G.set(-awayDirection.z, 0, awayDirection.x).multiplyScalar(jukeSign);
+    safePoint
+      .addScaledVector(juke, (24 + urgency * 30) * (difficulty.jukeSkill ?? 1) * personality.jukeBias)
+      .addScaledVector(awayDirection, -THREE.MathUtils.clamp(closingSpeed * 0.8, -6, 14));
+  } else if (mode === "flee_bait") {
+    const baitTarget = chooseSabotageTarget(car, threat, gameState, personality, difficulty);
+    if (baitTarget) {
+      const baitPos = flatCarPosition(baitTarget, tmpVec3F);
+      const threatToBait = tmpVec3G.copy(baitPos).sub(threatPos);
+      safeNormalize(threatToBait, awayDirection);
+      safePoint.lerp(
+        baitPos.addScaledVector(threatToBait, 7 + personality.sabotage * 5),
+        THREE.MathUtils.clamp(0.36 + personality.baitBias * 0.16, 0.28, 0.68),
+      );
+    }
+  } else if (mode === "flee_feature" && featureTacticalVector(car, threat, arenaId, "escape", personality, difficulty, tmpVec3I)) {
+    safePoint.lerp(
+      tmpVec3H.copy(pos).add(tmpVec3I),
+      THREE.MathUtils.clamp(0.4 + personality.routeBias * personality.featureAwareness * 0.1, 0.28, 0.72),
+    );
   }
 
   let bestShield = null;
@@ -546,10 +849,12 @@ export function updateAiCar(car, dt, {
   car.ai.decisionTimer = Math.max(0, car.ai.decisionTimer - dt);
   car.ai.mistakeTimer = Math.max(0, car.ai.mistakeTimer - dt);
   car.ai.feintTimer = Math.max(0, car.ai.feintTimer - dt);
+  car.ai.modeTimer = Math.max(0, car.ai.modeTimer - dt);
+  car.ai.trickCooldown = Math.max(0, car.ai.trickCooldown - dt);
   car.ai.lateralTimer -= dt;
   if (car.ai.lateralTimer <= 0) {
     car.ai.lateralSign *= -1;
-    car.ai.lateralTimer = 2.2 + rng() * 2.4;
+    car.ai.lateralTimer = (1.45 + rng() * 2.2) / Math.max(0.72, difficultyConfig.antiExploitSkill ?? 1);
   }
 
   if (gameState.phase !== "playing") return;
@@ -587,17 +892,40 @@ export function updateAiCar(car, dt, {
     const best = closestTagTargetFor(car, gameState, personality, difficultyConfig);
     if (best) {
       activeTarget = best;
-      chooseAiChaseVector(car, best, desired, arenaContactForPoint, personality, difficultyConfig);
-      blendFeatureVector(car, best, desired, arenaId, "chase", personality, difficultyConfig);
+      if (car.ai.modeTimer <= 0 || car.ai.modeTargetId !== best.id || !String(car.ai.mode).startsWith("chase_")) {
+        setAiMode(
+          car,
+          chooseChaseMode(car, best, rng, personality, difficultyConfig, arenaId),
+          best,
+          0.55 + 0.35 / Math.max(0.55, difficultyConfig.tacticalSkill ?? 1),
+          rng,
+          difficultyConfig,
+          personality,
+        );
+      }
+      chooseAiChaseVector(car, best, desired, arenaContactForPoint, personality, difficultyConfig, car.ai.mode, arenaId);
+      if (car.ai.mode !== "chase_feature") blendFeatureVector(car, best, desired, arenaId, "chase", personality, difficultyConfig);
     }
   } else if (itCar && itCar !== car) {
     activeTarget = itCar;
     const threatDistance = flatDistanceBetween(car, itCar);
     if (threatDistance > 0.001) {
-      chooseAiEscapeVector(car, itCar, desired, dt, gameState, rng, personality, difficultyConfig);
-      blendSabotageVector(car, itCar, desired, gameState, personality, difficultyConfig);
-      blendFeatureVector(car, itCar, desired, arenaId, "escape", personality, difficultyConfig);
+      if (car.ai.modeTimer <= 0 || car.ai.modeTargetId !== itCar.id || !String(car.ai.mode).startsWith("flee_")) {
+        setAiMode(
+          car,
+          chooseEscapeMode(car, itCar, gameState, rng, personality, difficultyConfig, arenaId),
+          itCar,
+          0.58 + 0.42 / Math.max(0.55, difficultyConfig.tacticalSkill ?? 1),
+          rng,
+          difficultyConfig,
+          personality,
+        );
+      }
+      chooseAiEscapeVector(car, itCar, desired, dt, gameState, rng, personality, difficultyConfig, car.ai.mode, arenaId);
+      if (car.ai.mode !== "flee_bait") blendSabotageVector(car, itCar, desired, gameState, personality, difficultyConfig);
+      if (car.ai.mode !== "flee_feature") blendFeatureVector(car, itCar, desired, arenaId, "escape", personality, difficultyConfig);
     } else {
+      setAiMode(car, "wander", null, 1.2, rng, difficultyConfig, personality);
       car.ai.waypointTimer -= dt;
       if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car, rng);
       desired.copy(car.ai.waypoint).sub(pos);
@@ -605,6 +933,7 @@ export function updateAiCar(car, dt, {
   }
 
   if (desired.lengthSq() < 0.001) {
+    if (car.ai.modeTimer <= 0) setAiMode(car, "wander", null, 1.2, rng, difficultyConfig, personality);
     car.ai.waypointTimer -= dt;
     if (car.ai.waypointTimer <= 0 || pos.distanceTo(car.ai.waypoint) < 8) pickWaypoint(car, rng);
     desired.copy(car.ai.waypoint).sub(pos);
@@ -626,6 +955,7 @@ export function updateAiCar(car, dt, {
     : 0.72 * personality.escapeAggression * (difficultyConfig.escapeSkill ?? 1);
   let aimAngle = 0;
   if (desired.lengthSq() > 0.001) aimAngle = steerToward(car, desired.normalize(), aiAggression);
+  car.ai.lastAimAngle = aimAngle;
 
   if (car.ai.mistakeTimer > 0) {
     car.input.steer = THREE.MathUtils.clamp(car.input.steer + car.ai.mistakeSteer * 0.24, -1, 1);
@@ -640,14 +970,21 @@ export function updateAiCar(car, dt, {
       car.body.velocity.x * desired.x +
       car.body.velocity.y * desired.y +
       car.body.velocity.z * desired.z;
-    if (targetDistance < 10 && absAim > 0.95) car.input.throttle = speed > 8 ? -0.42 : 0.42;
+    if (car.ai.mode === "chase_trap_wall" && targetDistance < 26 && absAim < 1.1) car.input.throttle = speed > 20 ? 0.74 : 1;
+    else if (car.ai.mode === "chase_cutoff" && targetDistance > 18 && absAim < 0.9) car.input.throttle = speed > 24 ? 0.82 : 1;
+    else if (targetDistance < 10 && absAim > 0.95) car.input.throttle = speed > 8 ? -0.42 : 0.42;
     else if (targetDistance < 22 && absAim > 0.8) car.input.throttle = speed > 11 ? -0.24 : 0.62;
     else if (absAim > 2.35) car.input.throttle = speed > 7 ? -0.38 : 0.48;
     else if (absAim > 1.35 && speed > 18) car.input.throttle = 0.64;
     else if (closingSpeed < -4 && targetDistance < 28) car.input.throttle = 0.46;
     else car.input.throttle = 1;
   } else if (!car.isIt && itCar) {
-    if (absAim > 2.55 && speed > 14) car.input.throttle = 0.62;
+    const threatClosing = flatClosingSpeed(itCar, car);
+    if (car.ai.mode === "flee_juke" && activeTargetDistance < 20 && speed > 10 && absAim > 1.05) {
+      car.input.throttle = threatClosing > 5 && speed > 17 ? 0.36 : 0.62;
+    } else if (car.ai.mode === "flee_bait" && activeTargetDistance > 18 && speed > 18) {
+      car.input.throttle = 0.72;
+    } else if (absAim > 2.55 && speed > 14) car.input.throttle = 0.62;
     else if (absAim > 1.65 && speed > 22) car.input.throttle = 0.78;
     else car.input.throttle = 1;
   }
@@ -698,24 +1035,51 @@ export function updateAiCar(car, dt, {
     car.input.steer *= -0.7;
   }
 
-  const linedUp = Math.abs(car.input.steer) < 0.25;
   if (car.boostCooldownRemaining <= 0) {
     const target = car.isIt ? activeTarget : itCar;
     const targetDistance = target ? flatDistanceBetween(car, target) : Infinity;
-    const moderatelyLinedUp = Math.abs(car.input.steer) < 0.36;
+    const alignment = 1 - THREE.MathUtils.clamp(Math.abs(car.input.steer), 0, 1);
+    const wallRisk = wallPressureForCar(car, 16);
     const boostSkill = difficultyConfig.boostDiscipline ?? 1;
+    const closing = target ? flatClosingSpeed(car.isIt ? car : target, car.isIt ? target : car) : 0;
+    const modeBoostBias = car.ai.mode === "chase_cutoff" || car.ai.mode === "chase_trap_wall"
+      ? 1.22
+      : car.ai.mode === "flee_juke"
+        ? 0.82
+        : car.ai.mode === "flee_open_space" || car.ai.mode === "flee_feature"
+          ? 1.12
+          : 1;
     const boostAsIt = car.isIt &&
       targetDistance > 8 &&
-      targetDistance < 64 * personality.boostAsIt &&
+      targetDistance < 70 * personality.boostAsIt &&
       speed > 4 &&
-      (moderatelyLinedUp || personality.chaseAggression > 1.12) &&
-      rng() < THREE.MathUtils.clamp(0.65 * personality.boostAsIt * boostSkill, 0.18, 0.96);
+      wallRisk < 0.92 &&
+      (alignment > 0.62 || (alignment > 0.46 && car.ai.mode !== "chase_direct")) &&
+      rng() < THREE.MathUtils.clamp((0.38 + alignment * 0.48 + Math.max(0, -closing) * 0.025) * personality.boostAsIt * boostSkill * modeBoostBias, 0.16, 0.98);
     const boostAsRunner = !car.isIt &&
       itCar &&
-      targetDistance < 44 * personality.boostAsRunner &&
-      (linedUp || speed < 8) &&
-      rng() < THREE.MathUtils.clamp(0.62 * personality.boostAsRunner * boostSkill, 0.16, 0.94);
+      targetDistance < 50 * personality.boostAsRunner &&
+      wallRisk < 0.8 &&
+      (alignment > 0.55 || speed < 9 || car.ai.mode === "flee_juke") &&
+      rng() < THREE.MathUtils.clamp((0.28 + alignment * 0.44 + Math.max(0, closing) * 0.026) * personality.boostAsRunner * boostSkill * modeBoostBias, 0.14, 0.96);
     if (boostAsIt || boostAsRunner) car.input.boostQueued = true;
+  }
+
+  if (!car.isIt &&
+    itCar &&
+    car.ai.mode === "flee_juke" &&
+    car.ai.trickCooldown <= 0 &&
+    activeTargetDistance < 18 * personality.jumpNearThreat &&
+    flatClosingSpeed(itCar, car) > 2 &&
+    speed > 7 &&
+    car.ai.jumpCooldown <= 0 &&
+    car.vehicle.numWheelsOnGround >= 2 &&
+    rng() < THREE.MathUtils.clamp(0.28 * personality.jukeBias * (difficultyConfig.jukeSkill ?? 1), 0.08, 0.58)
+  ) {
+    car.input.jumpQueued = true;
+    car.ai.jumpCooldown = 1.9;
+    car.ai.trickCooldown = 2.2 + rng() * 1.2;
+    car.ai.lateralSign *= -1;
   }
 
   if (!car.isIt &&

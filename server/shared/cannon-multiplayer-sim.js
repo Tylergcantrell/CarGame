@@ -587,6 +587,15 @@ function createCar(world, materials, slot, rng = Math.random) {
       mistakeSteer: 0,
       feintTimer: 0,
       feintSign: rng() < 0.5 ? -1 : 1,
+      mode: "wander",
+      modeTimer: 0,
+      modeSeed: rng(),
+      modeTargetId: null,
+      lastThreatDistance: Infinity,
+      lastTargetDistance: Infinity,
+      pressure: 0,
+      trickCooldown: 0,
+      lastAimAngle: 0,
     },
   };
   body.userData = { car };
@@ -613,6 +622,22 @@ function spawnCarAt(car, spawn) {
   car.score = 0;
   car.isIt = false;
   car.immunityRemaining = 0;
+  car.ai.stuckTimer = 0;
+  car.ai.unstickTimer = 0;
+  car.ai.reverseTimer = 0;
+  car.ai.targetId = null;
+  car.ai.mode = "wander";
+  car.ai.modeTimer = 0;
+  car.ai.modeTargetId = null;
+  car.ai.lastThreatDistance = Infinity;
+  car.ai.lastTargetDistance = Infinity;
+  car.ai.objectiveProgressTimer = 0;
+  car.ai.trickCooldown = 0;
+  car.ai.decisionTimer = 0;
+  car.ai.objectiveTimer = 0;
+  car.ai.desired.set(0, 0, 0);
+  car.ai.tacticalPoint.set(spawn.x, 0, spawn.z);
+  car.ai.lastPosition.set(spawn.x, 0, spawn.z);
   car.body.previousPosition.copy(car.body.position);
   car.body.previousQuaternion.copy(car.body.quaternion);
   car.body.interpolatedPosition.copy(car.body.position);

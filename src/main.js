@@ -2929,16 +2929,32 @@ function createCar({ id, name, color, isPlayer = false }) {
       unstickSteer: 1,
       lateralSign: Math.random() < 0.5 ? -1 : 1,
       lateralTimer: 1 + Math.random() * 2,
+      personalityKey: null,
       targetBiasTimer: 0,
       targetId: null,
       objective: new THREE.Vector3(),
       desired: new THREE.Vector3(),
       tacticalPoint: new THREE.Vector3(),
       lastPosition: new THREE.Vector3(),
+      lastObjectiveDistance: Infinity,
+      objectiveProgressTimer: 0,
       decisionTimer: Math.random() * 0.16,
       decisionInterval: 0.16 + Math.random() * 0.08,
       objectiveTimer: 0,
       jumpCooldown: 0,
+      mistakeTimer: 0,
+      mistakeSteer: 0,
+      feintTimer: 0,
+      feintSign: Math.random() < 0.5 ? -1 : 1,
+      mode: "wander",
+      modeTimer: 0,
+      modeSeed: Math.random(),
+      modeTargetId: null,
+      lastThreatDistance: Infinity,
+      lastTargetDistance: Infinity,
+      pressure: 0,
+      trickCooldown: 0,
+      lastAimAngle: 0,
     },
   };
   body.userData = { car };
@@ -3326,6 +3342,13 @@ function spawnCarAt(car, spawn) {
   car.ai.stuckTimer = 0;
   car.ai.unstickTimer = 0;
   car.ai.targetId = null;
+  car.ai.mode = "wander";
+  car.ai.modeTimer = 0;
+  car.ai.modeTargetId = null;
+  car.ai.lastThreatDistance = Infinity;
+  car.ai.lastTargetDistance = Infinity;
+  car.ai.objectiveProgressTimer = 0;
+  car.ai.trickCooldown = 0;
   car.ai.decisionTimer = Math.random() * car.ai.decisionInterval;
   car.ai.objectiveTimer = 0;
   car.ai.desired.set(0, 0, 0);
@@ -6537,10 +6560,13 @@ window.__arenaCarDebug = {
         visualWheelSpin: car.visualWheelSpin?.map((value) => Number(value.toFixed(4))) ?? [],
         visualWheelSteer: car.visualWheelSteer?.map((value) => Number(value.toFixed(4))) ?? [],
         ai: car.isPlayer ? null : {
+          personality: car.ai.personalityKey,
+          mode: car.ai.mode,
           stuckTimer: car.ai.stuckTimer,
           unstickTimer: car.ai.unstickTimer,
           reverseTimer: car.ai.reverseTimer,
           targetId: car.ai.targetId,
+          aimAngle: car.ai.lastAimAngle,
         },
         quaternion: [car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w],
       })),
