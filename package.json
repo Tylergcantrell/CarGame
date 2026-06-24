@@ -13,6 +13,7 @@
     "build": "vite build",
     "build:server": "vite build --outDir server/dist --emptyOutDir",
     "preview": "vite preview --host 127.0.0.1",
+    "bench:ai": "node scripts/bench-ai-scenarios.mjs",
     "test:sim": "node scripts/test-multiplayer-sim.mjs",
     "smoke:multiplayer": "node scripts/smoke-multiplayer.mjs",
     "stress:multiplayer": "node scripts/stress-multiplayer.mjs",

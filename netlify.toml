@@ -3,4 +3,4 @@
   publish = "dist"
 
 [build.environment]
-  VITE_MULTIPLAYER_URL = "wss://fragility-upstart-barrette.ngrok-free.dev"
+  VITE_MULTIPLAYER_URL = "wss://d2ium6379kwa2w.cloudfront.net"
