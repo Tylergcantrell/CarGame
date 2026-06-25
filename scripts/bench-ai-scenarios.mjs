@@ -146,7 +146,7 @@ function runTicks(round, seconds) {
         runnerFrames += 1;
         if (onCurve) runnerWallFrames += 1;
         const speed = Math.hypot(car.body.velocity.x, car.body.velocity.z);
-        if (itCar && speed < 4 && Math.hypot(car.body.position.x - itCar.body.position.x, car.body.position.z - itCar.body.position.z) < 24) {
+        if (itCar && car.immunityRemaining <= 0 && speed < 4 && Math.hypot(car.body.position.x - itCar.body.position.x, car.body.position.z - itCar.body.position.z) < 24) {
           runnerFreezeFrames += 1;
         }
       }
@@ -665,9 +665,9 @@ function closeLateralFinishScenario() {
   const cars = [...round.sim.cars.values()];
   const [tagger, runner] = cars;
   forceIt(cars, tagger);
-  pose(tagger, 0, 0, 0);
+  pose(tagger, 0, 0, 0, 0.55);
   velocity(tagger, 0, 0, 28);
-  pose(runner, 4.2, 8.6, Math.PI / 2);
+  pose(runner, 4.2, 8.6, Math.PI / 2, 0.55);
   velocity(runner, 14, 0, 2);
 
   let tagTime = null;
@@ -1187,7 +1187,7 @@ function purpleRoundScenario(seed) {
   round.sim = createSimState(round, { now: 0 });
   const cars = [...round.sim.cars.values()];
   forceIt(cars, cars[0]);
-  const metrics = runTicks(round, 30);
+  const metrics = runTicks(round, 45);
   const itCar = cars.find((car) => car.isIt);
   const result = {
     seed,
@@ -1201,6 +1201,7 @@ function purpleRoundScenario(seed) {
     itMode: itCar?.ai?.mode ?? null,
   };
   assert(result.minTravel > 8, "all AI cars should move meaningfully in the round benchmark");
+  assert(result.tags >= 1, `extreme seeded round should produce at least one tag: ${JSON.stringify(result)}`);
   return result;
 }
 
@@ -1223,9 +1224,9 @@ function fullRoundBalanceScenario() {
     bestDistance: Number(metrics.bestDistance.toFixed(2)),
     minTravel: Number(Math.min(...metrics.travel).toFixed(2)),
   };
-  assert(result.tags >= 3, "extreme full round should circulate tags, not leave one tagger stuck for two minutes");
+  assert(result.tags >= 5, "extreme full round should circulate tags, not leave one tagger stuck for two minutes");
   assert(result.recoverShare < 0.08, "full round should not be dominated by recovery states");
-  assert(result.runnerFreezeShare < 0.08, "runners should not freeze near active tag pressure");
+  assert(result.runnerFreezeShare < 0.08, `runners should not freeze near active tag pressure: ${JSON.stringify(result)}`);
   assert(result.taggerOvershootShare < 0.12, "taggers should not mostly blast past close targets");
   assert(result.nearShare > 0.035, "taggers should create sustained tag pressure over a full round");
   assert(result.finishShare > 0.008, "taggers should regularly convert pressure into real finish windows");

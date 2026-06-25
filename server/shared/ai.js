@@ -155,6 +155,9 @@ function ensureMind(car, rng) {
   ai.perceptionClock = finite(ai.perceptionClock);
   ai.perceptionSampleClock = finite(ai.perceptionSampleClock);
   ai.memorySampleClock = finite(ai.memorySampleClock);
+  ai.finishPressureTargetId ??= null;
+  ai.finishPressureTimer = finite(ai.finishPressureTimer);
+  ai.finishPressureMinDistance = finite(ai.finishPressureMinDistance, Infinity);
   ai.perceptionHistory ??= [];
   ai.opponentMemory ??= new Map();
   ai.tacticMemory ??= new Map();
@@ -568,6 +571,8 @@ function ensureOpponentMemory(ai, id) {
       brakeBias: 0,
       baitBias: 0,
       overcommitBias: 0,
+      escapeSideBias: 0,
+      lateralJukeBias: 0,
       jumpBias: 0,
       vulnerableBias: 0,
       confidence: 0,
@@ -613,6 +618,8 @@ function updateOpponentMemory(car, ai, gameState, dt, arenaContactForPoint, aren
     let brakeSample = 0;
     let baitSample = 0;
     let overcommitSample = 0;
+    let escapeSideSample = 0;
+    let lateralJukeSample = 0;
     if (memory.samples > 0 && speed > 4 && memory.lastSpeed > 4) {
       const previous = tmpVec3C.copy(memory.lastVelocity);
       previous.addScaledVector(contact.normal, -previous.dot(contact.normal));
@@ -622,6 +629,17 @@ function updateOpponentMemory(car, ai, gameState, dt, arenaContactForPoint, aren
         turnSample = THREE.MathUtils.clamp(previous.cross(current).dot(contact.normal) * 3.2, -1, 1);
         brakeSample = clamp01((memory.lastSpeed - speed) / Math.max(8, memory.lastSpeed * 0.45));
         if (previous.dot(current) < -0.15) brakeSample = Math.max(brakeSample, 0.65);
+      }
+    }
+    if (speed > 5) {
+      const selfPosition = carPosition(car, tmpVec3C);
+      const awayFromSelf = tmpVec3F.copy(position).sub(selfPosition);
+      projectOntoPlane(awayFromSelf, contact.normal, velocity.lengthSq() > EPS ? velocity : tmpVec3B.set(0, 0, 1));
+      const lateralVelocity = tmpVec3A.copy(velocity).addScaledVector(awayFromSelf, -velocity.dot(awayFromSelf));
+      const lateralSpeed = lateralVelocity.length();
+      if (lateralSpeed > 2.5) {
+        escapeSideSample = THREE.MathUtils.clamp(Math.sign(awayFromSelf.clone().cross(lateralVelocity).dot(contact.normal)) * clamp01(lateralSpeed / 22), -1, 1);
+        lateralJukeSample = clamp01((lateralSpeed - Math.abs(velocity.dot(awayFromSelf)) * 0.28) / 18);
       }
     }
     if (memory.samples > 0 && speed < Math.max(8, memory.lastSpeed * 0.42) && memory.lastSpeed > 14) {
@@ -656,6 +674,8 @@ function updateOpponentMemory(car, ai, gameState, dt, arenaContactForPoint, aren
     memory.brakeBias = THREE.MathUtils.lerp(memory.brakeBias, brakeSample, alpha);
     memory.baitBias = THREE.MathUtils.lerp(memory.baitBias, baitSample, alpha);
     memory.overcommitBias = THREE.MathUtils.lerp(memory.overcommitBias, overcommitSample, alpha);
+    memory.escapeSideBias = THREE.MathUtils.lerp(memory.escapeSideBias, escapeSideSample, alpha);
+    memory.lateralJukeBias = THREE.MathUtils.lerp(memory.lateralJukeBias, lateralJukeSample, alpha);
     memory.jumpBias = THREE.MathUtils.lerp(memory.jumpBias, jumpSample, alpha);
     memory.vulnerableBias = THREE.MathUtils.lerp(memory.vulnerableBias, vulnerableSample, alpha);
     memory.confidence = clamp01(memory.confidence + alpha * 0.42);
@@ -1564,8 +1584,11 @@ function opponentHypothesisWeights(entry) {
   const brakeBias = clamp01(finite(memory.brakeBias));
   const jumpBias = clamp01(finite(memory.jumpBias));
   const wallBias = clamp01(finite(memory.wallBias));
-  const left = 1 + Math.max(0, turnBias) * 1.25 * confidence;
-  const right = 1 + Math.max(0, -turnBias) * 1.25 * confidence;
+  const escapeSide = THREE.MathUtils.clamp(finite(memory.escapeSideBias), -1, 1);
+  const lateralJuke = clamp01(finite(memory.lateralJukeBias));
+  const combinedTurn = THREE.MathUtils.clamp(turnBias * 0.7 + escapeSide * 0.9, -1, 1);
+  const left = 1 + Math.max(0, combinedTurn) * (1.25 + lateralJuke * 0.75) * confidence;
+  const right = 1 + Math.max(0, -combinedTurn) * (1.25 + lateralJuke * 0.75) * confidence;
   const reverse = 0.82 + (brakeBias * 1.45 + jumpBias * 0.45) * confidence;
   const carry = 1.18 + clamp01(entry.speed / 32) * 0.35 + wallBias * 0.18 * confidence - brakeBias * 0.45 * confidence;
   entry.hypothesisWeights = [
@@ -1644,15 +1667,42 @@ function closeCounterFinishJobs(target, facts, config, forward, lateral) {
   const targetVel = carVelocity(target.car, tmpVec3C);
   targetVel.addScaledVector(facts.surfaceNormal, -targetVel.dot(facts.surfaceNormal));
   const runnerForward = target.speed > 5 ? safeNormalize(targetVel, forward) : targetForward(target, tmpVec3D);
-  const escapeSideSign = Math.sign(runnerForward.clone().cross(fromTagger).dot(facts.surfaceNormal)) || 1;
+  const learnedSide = target.memory && Math.abs(finite(target.memory.escapeSideBias)) > 0.12
+    ? Math.sign(finite(target.memory.escapeSideBias))
+    : 0;
+  const escapeSideSign = learnedSide || Math.sign(runnerForward.clone().cross(fromTagger).dot(facts.surfaceNormal)) || 1;
   const escapeLane = tmpVec3E.copy(fromTagger)
     .multiplyScalar(0.62)
     .addScaledVector(lateral, escapeSideSign * 0.72);
   projectOntoPlane(escapeLane, facts.surfaceNormal, fromTagger);
   const closeScale = 1 - clamp01((target.contactDistance - TAG_RANGE) / 22);
+  const runnerSpeedScale = clamp01(target.speed / 34);
+  const crossingSignal = runnerCrossingPressure(target, facts);
+  if (crossingSignal > 0.16 && target.contactDistance < TAG_RANGE + 16 && target.speed > 8) {
+    const contactLeadTime = THREE.MathUtils.clamp(
+      target.contactDistance / Math.max(24, facts.speed + target.speed),
+      0.08,
+      THREE.MathUtils.lerp(0.18, 0.28, planning)
+    );
+    const contactPoint = targetPos.clone()
+      .addScaledVector(targetVel, contactLeadTime)
+      .addScaledVector(escapeLane, THREE.MathUtils.lerp(0.5, 1.8, planning))
+      .addScaledVector(lateral, -escapeSideSign * THREE.MathUtils.lerp(1.2, 2.8, closeScale + runnerSpeedScale * 0.35));
+    projectArenaSurfacePoint(contactPoint, facts, 4);
+    jobs.push(makeJob({
+      type: "tag",
+      point: contactPoint,
+      target,
+      desiredSpeed: THREE.MathUtils.lerp(28, 37, planning),
+      urgency: 1,
+      plan: "finish_contact_patch",
+      horizon: THREE.MathUtils.lerp(0.26, 0.46, planning),
+      score: 26 + closeScale * 38 + crossingSignal * 36,
+    }));
+  }
   const escapePoint = targetPos.clone()
     .addScaledVector(escapeLane, THREE.MathUtils.lerp(7, 15, planning))
-    .addScaledVector(runnerForward, THREE.MathUtils.lerp(2, 8, clamp01(target.speed / 34)));
+    .addScaledVector(runnerForward, THREE.MathUtils.lerp(2, 8, runnerSpeedScale));
   projectArenaSurfacePoint(escapePoint, facts, 4);
   jobs.push(makeJob({
     type: "tag",
@@ -1696,7 +1746,7 @@ function containmentTagJobs(target, facts, config, future, forward, lateral, inw
   projectArenaSurfacePoint(escapeDeny, facts, 4);
   const routeRisk = featureRiskAlong(facts.position, escapeDeny, facts) + surfaceRisk(escapeDeny, facts, surfaceDirectionToPoint(facts.position, escapeDeny, facts, tmpVec3C));
   if (routeRisk > THREE.MathUtils.lerp(0.72, 0.96, planning)) return [];
-  return [makeJob({
+  const jobs = [makeJob({
     type: "tag",
     point: escapeDeny,
     target,
@@ -1706,6 +1756,29 @@ function containmentTagJobs(target, facts, config, future, forward, lateral, inw
     horizon: THREE.MathUtils.lerp(0.88, 1.28, planning),
     score: 28 + clamp01((target.contactDistance - 20) / 38) * 32 + speedT * 24,
   })];
+  if (planning > 0.9 && target.contactDistance > TAG_RANGE + 32) {
+    const radius = Math.hypot(targetPos.x, targetPos.z);
+    const boundary = clamp01((radius - curveStartRadius()) / 34);
+    const herdPoint = future.clone()
+      .addScaledVector(lateral, -sideSign * THREE.MathUtils.lerp(18, 30, speedT))
+      .addScaledVector(inward, THREE.MathUtils.lerp(14, 34, boundary))
+      .addScaledVector(forward, THREE.MathUtils.lerp(10, 20, speedT));
+    projectArenaSurfacePoint(herdPoint, facts, 4);
+    const herdRisk = featureRiskAlong(facts.position, herdPoint, facts) * 0.7 + surfaceRisk(herdPoint, facts, surfaceDirectionToPoint(facts.position, herdPoint, facts, tmpVec3C));
+    if (herdRisk < 0.86) {
+      jobs.push(makeJob({
+        type: "tag",
+        point: herdPoint,
+        target,
+        desiredSpeed: 44,
+        urgency: 0.68,
+        plan: "herd_escape_lane",
+        horizon: THREE.MathUtils.lerp(1.32, 1.85, planning),
+        score: 26 + speedT * 30 + boundary * 18,
+      }));
+    }
+  }
+  return jobs;
 }
 
 function runnerControlSearchTemplates(car, config, facts) {
@@ -2039,6 +2112,15 @@ function scoreTagJob(car, job, facts, config, personality) {
       (job.plan === "orbit_cutoff_tag" || job.plan === "deep_cutoff_tag" || job.plan === "arc_pinch_tag" || job.plan === "tag_feature_cut" || job.plan === "tag_feature_bypass")
       ? -42
       : 0;
+  const sealWindow = target.contactDistance < TAG_RANGE + 2.5;
+  const sealValue = sealWindow
+    ? (
+      (job.plan === "direct_tag" || job.plan === "reverse_tag" ? 96 : 0) +
+      (job.plan === "finish_commit" || job.plan === "finish_side_swipe" || job.plan === "finish_brake_turn" ? 74 : 0) +
+      (job.plan === "search_hook_in" || job.plan === "search_brake_in" ? 38 : 0) -
+      (job.plan === "finish_escape_block" || job.plan === "finish_counter_juke" || job.plan === "contain_escape_lane" || job.plan === "herd_escape_lane" ? 118 : 0)
+    ) * (1 - clamp01((target.contactDistance - TAG_RANGE) / 2.5))
+    : 0;
   const interceptDistance = interceptSum / hypothesisCount;
   const predictivePlan =
     job.plan === "lead_tag" ||
@@ -2049,6 +2131,7 @@ function scoreTagJob(car, job, facts, config, personality) {
     job.plan === "deep_cutoff_tag" ||
     job.plan === "arc_pinch_tag" ||
     job.plan === "contain_escape_lane" ||
+    job.plan === "herd_escape_lane" ||
     job.plan === "adaptive_intercept_tag" ||
     job.plan === "tag_feature_bypass" ||
     job.plan === "tag_feature_cut" ||
@@ -2062,13 +2145,13 @@ function scoreTagJob(car, job, facts, config, personality) {
       ? (1 - clamp01((interceptDistance - 10) / 30)) * (36 + risk * 18 + clamp01(target.speed / 32) * (42 + risk * 20))
       : 0;
   const longCutoffValue =
-    (job.plan === "orbit_cutoff_tag" || job.plan === "deep_cutoff_tag" || job.plan === "arc_pinch_tag" || job.plan === "contain_escape_lane") && target.contactDistance > 26
+    (job.plan === "orbit_cutoff_tag" || job.plan === "deep_cutoff_tag" || job.plan === "arc_pinch_tag" || job.plan === "contain_escape_lane" || job.plan === "herd_escape_lane") && target.contactDistance > 26
       ? clamp01((horizon - 1.1) / 1.8) * clamp01(target.speed / 26) * (52 + risk * 44)
       : 0;
   const containmentValue =
-    job.plan === "contain_escape_lane"
+    job.plan === "contain_escape_lane" || job.plan === "herd_escape_lane"
       ? clamp01((target.contactDistance - TAG_RANGE - 10) / 38) * (
-        48 +
+        (job.plan === "herd_escape_lane" ? 38 : 48) +
         clamp01(target.speed / 32) * 42 +
         clamp01((target.contactDistance - finalDistance) / 26) * 38
       )
@@ -2085,20 +2168,21 @@ function scoreTagJob(car, job, facts, config, personality) {
         : job.plan === "tag_boost_lane"
           ? clamp01((target.contactDistance - TAG_RANGE - 12) / 44) * 46 + clamp01(target.speed / 36) * 24
           : 0;
+  const contactPatchPlan = job.plan === "finish_contact_patch";
   const counterFinishValue =
-    job.plan === "finish_escape_block" || job.plan === "finish_counter_juke"
+    job.plan === "finish_escape_block" || job.plan === "finish_counter_juke" || contactPatchPlan
       ? clamp01((TAG_RANGE + 22 - target.contactDistance) / 22) * (
-        74 +
+        (contactPatchPlan ? 64 : 74) +
         clamp01(target.speed / 34) * 34 +
         clamp01(Math.abs(finite(target.angle)) / 1.2) * 22 +
-        (job.plan === "finish_escape_block" ? crossingPressure * 88 : 0) +
+        (job.plan === "finish_escape_block" || contactPatchPlan ? crossingPressure * 88 : 0) +
         (target.memory ? clamp01(Math.abs(finite(target.memory.turnBias)) * finite(target.memory.confidence, 1)) * 18 : 0)
       )
       : 0;
   const lateralFinishValue =
     crossingPressure > 0.08 && target.contactDistance < TAG_RANGE + 20
       ? (
-        (job.plan === "finish_escape_block" || job.plan === "finish_side_swipe" ? 88 : 0) +
+        (job.plan === "finish_escape_block" || job.plan === "finish_side_swipe" || contactPatchPlan ? 88 : 0) +
         (job.plan === "finish_counter_juke" ? 22 : 0) +
         (job.plan === "search_hook_in" || job.plan === "search_cut_out" || job.plan === "search_boost_cut_out" ? 46 : 0) -
         (job.plan === "finish_commit" || job.plan === "direct_tag" || job.plan === "search_commit" ? 64 : 0)
@@ -2106,8 +2190,8 @@ function scoreTagJob(car, job, facts, config, personality) {
       : 0;
   const escapeCoverage = closeEscapeCoverage(job, target, facts, horizon);
   const escapeCoverageValue = escapeCoverage * (
-    job.plan === "finish_escape_block" || job.plan === "finish_counter_juke"
-      ? 118
+    job.plan === "finish_escape_block" || job.plan === "finish_counter_juke" || contactPatchPlan
+      ? contactPatchPlan ? 96 : 118
       : job.plan.startsWith?.("finish_")
         ? 76
         : job.plan.startsWith?.("search_")
@@ -2161,6 +2245,17 @@ function scoreTagJob(car, job, facts, config, personality) {
   const riskAdjustedRouteCost = routeCost * THREE.MathUtils.lerp(1.22, 0.82, risk);
   const targetStickiness = target.id === car.ai.targetId && target.contactDistance < 42 ? 6 : 0;
   const learnedTacticValue = tacticBias(car.ai, job.plan) * THREE.MathUtils.lerp(10, 34, clamp01(finite(config.planningSkill) / 1.35));
+  const staleFinishPressure = target.id === car.ai.finishPressureTargetId
+    ? clamp01(finite(car.ai.finishPressureTimer) / 2.4) * (1 - clamp01((finite(car.ai.finishPressureMinDistance, Infinity) - TAG_RANGE) / 14))
+    : 0;
+  const staleFinishValue = staleFinishPressure > 0.05
+    ? (
+      (job.plan === "direct_tag" || job.plan === "reverse_tag" ? 42 : 0) +
+      (job.plan.startsWith?.("finish_") || job.plan.startsWith?.("search_") ? 66 : 0) +
+      (job.plan === "finish_contact_patch" || job.plan === "finish_escape_block" || job.plan === "finish_counter_juke" ? 44 : 0) -
+      (job.plan === "lead_tag" || job.plan === "contain_escape_lane" || job.plan === "herd_escape_lane" || job.plan === "cutoff_tag" ? 54 : 0)
+    ) * staleFinishPressure
+    : 0;
   return (
     tagEaseValue(target) * finite(config.aggression) * personality.chase +
     tagStrategicValue(target, facts, config, personality) +
@@ -2170,6 +2265,7 @@ function scoreTagJob(car, job, facts, config, personality) {
     directFinish +
     closeDirectBias +
     closeConversionDiscipline +
+    sealValue +
     predictiveValue +
     longCutoffValue +
     containmentValue +
@@ -2182,6 +2278,7 @@ function scoreTagJob(car, job, facts, config, personality) {
     overshootValue +
     actionValue +
     learnedTacticValue +
+    staleFinishValue +
     targetStickiness -
     directFollowCost -
     detachedTargetCost -
@@ -2622,6 +2719,7 @@ function shouldRecover(facts) {
   const supportDot = finite(facts.surfaceUpDot, facts.upDot);
   if (supportDot < 0.18) return true;
   if (Math.abs(facts.forwardY) > 0.84 && supportDot < 0.5) return true;
+  if (facts.wheels <= 0 && facts.speed < 2.2 && Math.abs(finite(facts.surfaceDistance)) > 0.35) return true;
   if (facts.wheels <= 1 && supportDot < 0.58) return true;
   return facts.wheels <= 1 && facts.speed < 3.5 && supportDot < 0.72;
 }
@@ -2629,6 +2727,7 @@ function shouldRecover(facts) {
 function shouldUnstick(facts, stuckTimer) {
   if (shouldRecover(facts)) return false;
   if (facts.speed > 3.2) return false;
+  if (facts.wheels <= 0 && stuckTimer > 0.22) return true;
   if (stuckTimer > 0.72) return true;
   return facts.wheels >= 1 && facts.speed < 1.8 && stuckTimer > 0.3;
 }
@@ -2807,43 +2906,75 @@ function applyCloseTagControl(car, job, facts) {
   const targetVelocity = carVelocity(target.car, tmpVec3B);
   targetVelocity.addScaledVector(facts.surfaceNormal, -targetVelocity.dot(facts.surfaceNormal));
   const leadTime = THREE.MathUtils.clamp(target.contactDistance / Math.max(18, facts.speed + target.speed * 0.5), 0.08, 0.32);
-  const aimPoint = tmpVec3C.copy(targetPoint).addScaledVector(targetVelocity, leadTime);
+  const preservePatch = job.plan === "finish_contact_patch";
+  const aimPoint = preservePatch
+    ? tmpVec3F.copy(job.point)
+    : tmpVec3F.copy(targetPoint).addScaledVector(targetVelocity, leadTime);
+  if (!preservePatch && job.plan === "finish_escape_block" && job.point?.isVector3) {
+    aimPoint.lerp(job.point, 0.32);
+  }
   const targetAway = tangentDirection(facts.position, targetPoint, facts.surfaceNormal, facts.forward, tmpVec3D);
   const targetLateral = tmpVec3E.copy(targetVelocity).addScaledVector(targetAway, -targetVelocity.dot(targetAway));
   const lateralSpeed = targetLateral.length();
-  if (lateralSpeed > 5 && target.contactDistance < TAG_RANGE + 12) {
+  if (!preservePatch && lateralSpeed > 5 && target.contactDistance < TAG_RANGE + 12) {
     aimPoint.addScaledVector(targetLateral.multiplyScalar(1 / lateralSpeed), THREE.MathUtils.clamp(lateralSpeed * 0.16, 1.2, 4.8));
+  }
+  if (!preservePatch && target.contactDistance < TAG_RANGE + 9) {
+    const sideSign = Math.sign(runnerCrossingPressure(target, facts) * (finite(target.memory?.escapeSideBias) || 0)) ||
+      Math.sign(finite(target.angle)) ||
+      car.ai.lateralSign ||
+      1;
+    const sideAxis = perpendicular(targetAway, sideSign, tmpVec3B, facts.surfaceNormal);
+    const sideAmount = THREE.MathUtils.lerp(0.55, 1.45, clamp01((TAG_RANGE + 9 - target.contactDistance) / 9));
+    aimPoint.addScaledVector(sideAxis, sideAmount);
   }
   projectArenaSurfacePoint(aimPoint, facts, 4);
   const local = localDirectionToPoint(car, aimPoint, facts.forward, facts.surfaceNormal);
   const angle = Math.atan2(local.x, local.z);
   const absAngle = Math.abs(angle);
-  const steer = THREE.MathUtils.clamp(angle / 0.82, -1, 1);
+  const crossing = runnerCrossingPressure(target, facts);
+  const steerCap = preservePatch
+    ? 0.86
+    : crossing > 0.12 && target.speed > 8 && absAngle < 1.08 ? 0.64 : 1;
+  const steer = THREE.MathUtils.clamp(angle / 0.82, -steerCap, steerCap);
   car.input.steer = steer;
 
-  if (job.plan === "reverse_tag" && local.z < -0.18 && target.contactDistance < 26 && facts.speed < 18) {
-    const rearAngle = Math.atan2(local.x, -local.z);
-    car.input.steer = THREE.MathUtils.clamp(-rearAngle / 0.88, -1, 1);
-    car.input.throttle = target.contactDistance < TAG_RANGE + 3 ? -1 : -0.92;
-    car.input.boostQueued = false;
-    return true;
+  if (job.plan === "reverse_tag" && target.contactDistance < 26 && facts.speed < 18) {
+    const rearLocal = localDirectionToPoint(car, targetPoint, facts.forward, facts.surfaceNormal);
+    if (rearLocal.z < -0.18) {
+      const rearAngle = Math.atan2(rearLocal.x, -rearLocal.z);
+      car.input.steer = THREE.MathUtils.clamp(-rearAngle / 0.88, -1, 1);
+      car.input.throttle = target.contactDistance < TAG_RANGE + 3 ? -1 : -0.92;
+      car.input.boostQueued = false;
+      return true;
+    }
   }
 
   if (absAngle > 1.18 && facts.speed > 16) {
-    car.input.throttle = tractionLimitedThrottle(facts.speed > 30 ? -0.28 : 0.12, car.input.steer, facts);
+    const throttle = preservePatch
+      ? (facts.speed > 34 ? 0.58 : 0.92)
+      : (facts.speed > 30 ? -0.28 : 0.12);
+    car.input.throttle = tractionLimitedThrottle(throttle, car.input.steer, facts);
     car.input.boostQueued = false;
     return true;
   }
 
   if (absAngle > 0.68) {
-    car.input.throttle = tractionLimitedThrottle(facts.speed > 26 ? 0.38 : 0.74, car.input.steer, facts);
+    const throttle = preservePatch
+      ? (facts.speed > 34 ? 0.62 : 0.92)
+      : crossing > 0.12 && target.speed > 8 && absAngle < 1.08
+      ? (facts.speed > 34 ? 0.62 : 0.88)
+      : (facts.speed > 26 ? 0.38 : 0.74);
+    car.input.throttle = tractionLimitedThrottle(throttle, car.input.steer, facts);
     car.input.boostQueued = false;
     return true;
   }
 
   const closing = finite(target.closing);
   const finishThrottle = target.contactDistance < TAG_RANGE + 3
-    ? (closing > 24 && absAngle > 0.32 ? 0.36 : 1)
+    ? (facts.speed > 24 && target.contactDistance < TAG_RANGE + 1.2
+      ? (closing > 12 ? 0.12 : 0.42)
+      : closing > 24 && absAngle > 0.32 ? 0.36 : 1)
     : target.contactDistance < TAG_RANGE + 7
       ? (closing > 28 && absAngle > 0.45 ? 0.58 : 0.92)
       : Math.max(car.input.throttle, 0.82);
@@ -3044,6 +3175,26 @@ function applyMistake(car, ai, config, rng, dt) {
 
 function updateDebugFields(car, job, facts, canRight = false) {
   const ai = car.ai;
+  if (car.isIt && job.target?.id && job.target.immunity <= 0 && job.target.contactDistance < TAG_RANGE + 18) {
+    if (ai.finishPressureTargetId === job.target.id) {
+      ai.finishPressureTimer = Math.min(4, finite(ai.finishPressureTimer) + 0.05);
+      ai.finishPressureMinDistance = Math.min(finite(ai.finishPressureMinDistance, Infinity), finite(job.target.contactDistance, Infinity));
+    } else {
+      ai.finishPressureTargetId = job.target.id;
+      ai.finishPressureTimer = 0.05;
+      ai.finishPressureMinDistance = finite(job.target.contactDistance, Infinity);
+    }
+  } else if (car.isIt) {
+    ai.finishPressureTimer = Math.max(0, finite(ai.finishPressureTimer) - 0.08);
+    if (ai.finishPressureTimer <= 0) {
+      ai.finishPressureTargetId = null;
+      ai.finishPressureMinDistance = Infinity;
+    }
+  } else {
+    ai.finishPressureTargetId = null;
+    ai.finishPressureTimer = 0;
+    ai.finishPressureMinDistance = Infinity;
+  }
   ai.intent = job;
   ai.targetId = job.target?.id ?? null;
   ai.mode = job.type;
