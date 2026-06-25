@@ -2326,19 +2326,25 @@ function getBoostFlameResources() {
         color: 0xff5a1f,
         transparent: true,
         opacity: 0.78,
+        depthTest: false,
         depthWrite: false,
+        blending: THREE.AdditiveBlending,
       }),
       innerMaterial: new THREE.MeshBasicMaterial({
         color: 0xfff1a8,
         transparent: true,
         opacity: 0.9,
+        depthTest: false,
         depthWrite: false,
+        blending: THREE.AdditiveBlending,
       }),
       coreMaterial: new THREE.MeshBasicMaterial({
         color: 0xffffff,
         transparent: true,
         opacity: 0.68,
+        depthTest: false,
         depthWrite: false,
+        blending: THREE.AdditiveBlending,
       }),
     };
   }
@@ -2366,6 +2372,7 @@ function makeBoostFlame() {
   light.position.set(0, 0.04, -1.98);
 
   group.add(light);
+  group.scale.set(1.18, 1.18, 1.24);
   group.visible = false;
   group.userData.light = light;
   return group;
@@ -2912,6 +2919,7 @@ function createCar({ id, name, color, isPlayer = false }) {
     currentSteering: 0,
     boostTimeRemaining: 0,
     boostCooldownRemaining: 0,
+    boostVisualUntil: 0,
     surfaceContactGrace: 0,
     surfaceContactNormal: new THREE.Vector3(0, 1, 0),
     surfaceContactCount: 0,
@@ -2999,6 +3007,7 @@ function deactivateCar(car) {
   car.input = makeInputState();
   car.boostTimeRemaining = 0;
   car.boostCooldownRemaining = 0;
+  car.boostVisualUntil = 0;
   car.manualRightingActive = false;
   car.manualRightingElapsed = 0;
   car.isIt = false;
@@ -3334,6 +3343,7 @@ function spawnCarAt(car, spawn) {
   car.input = makeInputState();
   car.boostTimeRemaining = 0;
   car.boostCooldownRemaining = 0;
+  car.boostVisualUntil = 0;
   car.surfaceContactGrace = 0;
   car.surfaceContactNormal.set(0, 1, 0);
   car.surfaceContactCount = 0;
@@ -4092,8 +4102,11 @@ function setPredictedCarFromSnapshot(carSnapshot) {
   predictedCar.isIt = carSnapshot.isIt;
   if (carSnapshot.input) predictedCar.input = cloneInputSnapshot(carSnapshot.input);
   predictedCar.immunityRemaining = carSnapshot.immunityRemaining ?? predictedCar.immunityRemaining ?? 0;
-  predictedCar.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? predictedCar.boostTimeRemaining ?? 0;
-  predictedCar.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? predictedCar.boostCooldownRemaining ?? 0;
+  applyNetworkBoostSample(
+    predictedCar,
+    carSnapshot.boostTimeRemaining ?? predictedCar.boostTimeRemaining ?? 0,
+    carSnapshot.boostCooldownRemaining ?? predictedCar.boostCooldownRemaining ?? 0,
+  );
   applyManualRightingSnapshot(predictedCar, carSnapshot);
 }
 
@@ -4252,8 +4265,11 @@ function applySharedCannonSnapshotToVisuals(snapshot, { localOnly = false, snap 
     car.isIt = carSnapshot.isIt;
     if (carSnapshot.input && (car !== playerCar || gameState.spectating)) car.input = cloneInputSnapshot(carSnapshot.input);
     car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
-    car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
-    car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
+    applyNetworkBoostSample(
+      car,
+      carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0,
+      carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0,
+    );
     if (car.isIt) itCar = car;
     if (localOnly && car !== playerCar) continue;
     writeCarBodyState(car, carSnapshot, { snap });
@@ -4402,6 +4418,11 @@ function writeCarBodyState(car, snapshot, { snap = false } = {}) {
   car.body.force.set(0, 0, 0);
   car.body.torque.set(0, 0, 0);
   car.body.quaternion.set(snapshot.quaternion[0], snapshot.quaternion[1], snapshot.quaternion[2], snapshot.quaternion[3]);
+  applyNetworkBoostSample(
+    car,
+    snapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0,
+    snapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0,
+  );
   car.manualRightingActive = false;
   car.manualRightingElapsed = 0;
   applyManualRightingSnapshot(car, snapshot);
@@ -4423,7 +4444,15 @@ function cloneNetworkSnapshot(snapshot, serverTime, receivedAt) {
     velocity: [...snapshot.velocity],
     angularVelocity: [...(snapshot.angularVelocity ?? [0, 0, 0])],
     quaternion: [...snapshot.quaternion],
+    boostTimeRemaining: snapshot.boostTimeRemaining ?? 0,
+    boostCooldownRemaining: snapshot.boostCooldownRemaining ?? 0,
   };
+}
+
+function applyNetworkBoostSample(car, boostTimeRemaining = 0, boostCooldownRemaining = 0) {
+  car.boostTimeRemaining = Math.max(0, Number(boostTimeRemaining) || 0);
+  car.boostCooldownRemaining = Math.max(0, Number(boostCooldownRemaining) || 0);
+  if (car.boostTimeRemaining > 0) car.boostVisualUntil = Math.max(car.boostVisualUntil ?? 0, performance.now() + 220);
 }
 
 function setNetworkCarTarget(car, snapshot, serverTime, receivedAt = performance.now()) {
@@ -4486,6 +4515,12 @@ function writeInterpolatedNetworkState(car, first, second, alpha) {
     networkSmoothedQuat.z,
     networkSmoothedQuat.w,
   );
+  const boostTimeRemaining = Math.max(
+    THREE.MathUtils.lerp(first.boostTimeRemaining ?? 0, second.boostTimeRemaining ?? 0, t),
+    Math.min(first.boostTimeRemaining ?? 0, second.boostTimeRemaining ?? 0),
+  );
+  const boostCooldownRemaining = THREE.MathUtils.lerp(first.boostCooldownRemaining ?? 0, second.boostCooldownRemaining ?? 0, t);
+  applyNetworkBoostSample(car, boostTimeRemaining, boostCooldownRemaining);
 }
 
 function writeExtrapolatedNetworkState(car, sample, elapsedMs) {
@@ -4498,6 +4533,9 @@ function writeExtrapolatedNetworkState(car, sample, elapsedMs) {
   car.body.velocity.set(sample.velocity[0], sample.velocity[1], sample.velocity[2]);
   car.body.angularVelocity.set(sample.angularVelocity[0], sample.angularVelocity[1], sample.angularVelocity[2]);
   car.body.quaternion.set(sample.quaternion[0], sample.quaternion[1], sample.quaternion[2], sample.quaternion[3]);
+  const boostTimeRemaining = Math.max(0, (sample.boostTimeRemaining ?? 0) - seconds);
+  const boostCooldownRemaining = Math.max(0, (sample.boostCooldownRemaining ?? 0) - seconds);
+  applyNetworkBoostSample(car, boostTimeRemaining, boostCooldownRemaining);
 }
 
 function finalizeNetworkControlledBody(car) {
@@ -4601,8 +4639,11 @@ function applyServerSnapshot(snapshot) {
     car.isIt = carSnapshot.isIt;
     if (carSnapshot.input && (car !== playerCar || gameState.spectating)) car.input = cloneInputSnapshot(carSnapshot.input);
     car.immunityRemaining = carSnapshot.immunityRemaining ?? car.immunityRemaining ?? 0;
-    car.boostTimeRemaining = carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0;
-    car.boostCooldownRemaining = carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0;
+    applyNetworkBoostSample(
+      car,
+      carSnapshot.boostTimeRemaining ?? car.boostTimeRemaining ?? 0,
+      carSnapshot.boostCooldownRemaining ?? car.boostCooldownRemaining ?? 0,
+    );
     if (car.isIt) itCar = car;
     if (car === playerCar) {
       multiplayerState.localServerSnapshot = carSnapshot;
@@ -5459,6 +5500,7 @@ function applyBoost(car, dt) {
   if (car.boostTimeRemaining <= 0) return;
 
   car.boostTimeRemaining = Math.max(0, car.boostTimeRemaining - dt);
+  car.boostVisualUntil = Math.max(car.boostVisualUntil ?? 0, performance.now() + 220);
   boostForce.set(0, 0, vehicleTuning.boostForce);
   car.body.applyLocalForce(boostForce, boostPoint);
   car.body.wakeUp();
@@ -6117,7 +6159,7 @@ function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
   car.body.position.copy(savedChassisPosition);
   car.body.quaternion.copy(savedChassisQuaternion);
 
-  car.boostFlame.visible = car.boostTimeRemaining > 0;
+  car.boostFlame.visible = car.boostTimeRemaining > 0 || performance.now() < (car.boostVisualUntil ?? 0);
   if (car.boostFlame.visible) {
     const flicker = 0.9 + Math.sin(visualTime * 0.05 + car.id.length) * 0.11 + Math.sin(visualTime * 0.083 + car.id.length * 3.1) * 0.04;
     car.boostFlame.scale.set(1, 1, flicker);

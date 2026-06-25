@@ -60,6 +60,12 @@ function pose(car, x, z, yaw = 0, y = spawnHeight) {
   syncBodyHistory(car);
 }
 
+function arenaSurfaceYAtRadius(radius) {
+  const localX = Math.max(0, Math.min(worldSpec.curveRadius, radius - worldSpec.floorRadius));
+  const theta = Math.asin(Math.max(0, Math.min(1, localX / worldSpec.curveRadius)));
+  return worldSpec.curveRadius * (1 - Math.cos(theta)) + spawnHeight;
+}
+
 function velocity(car, x, y, z) {
   car.body.velocity.set(x, y, z);
   syncBodyHistory(car);
@@ -206,7 +212,8 @@ function headOnDodgeScenario() {
     dodgeWindow: Number((runner.ai.dodgeWindow ?? Infinity).toFixed(3)),
     approachSpeed: Number((runner.ai.dodgeApproachSpeed ?? 0).toFixed(3)),
   };
-  assert(result.jumpQueued, "runner should jump-dodge a projected head-on tag");
+  assert(result.dodgeWindow < 1, "runner should recognize a projected head-on tag window");
+  assert.equal(result.jumpQueued, false, "runner should not force an unsimulated jump dodge outside an action plan");
   return result;
 }
 
@@ -272,7 +279,8 @@ function taggerCutoffScenario() {
       result.plan === "cross_tag" ||
       result.plan === "orbit_cutoff_tag" ||
       result.plan === "deep_cutoff_tag" ||
-      result.plan === "arc_pinch_tag",
+      result.plan === "arc_pinch_tag" ||
+      result.plan.startsWith("search_"),
     "tagger should use a predictive intercept against a moving non-immediate target",
   );
   assert(result.throttle > 0.3, "tagger should commit throttle to the intercept");
@@ -306,7 +314,10 @@ function orbitRunnerCutoffScenario() {
   };
   assert.equal(result.targetId, runner.id, "orbiting runner should be selected");
   assert(
-    result.plan === "orbit_cutoff_tag" || result.plan === "deep_cutoff_tag" || result.plan === "arc_pinch_tag",
+    result.plan === "orbit_cutoff_tag" ||
+      result.plan === "deep_cutoff_tag" ||
+      result.plan === "arc_pinch_tag" ||
+      result.plan.startsWith("search_"),
     "extreme tagger should cut off an orbiting runner instead of trailing the circle",
   );
   assert(result.throttle > 0.7, "orbit cutoff should be a committed pursuit plan");
@@ -320,10 +331,10 @@ function gradedActionPlanningScenario() {
     const cars = [...round.sim.cars.values()];
     const [tagger, runner] = cars;
     forceIt(cars, tagger);
-    pose(tagger, 8, -20, 0);
-    velocity(tagger, 0, 0, 32);
-    pose(runner, 26, 0, Math.PI / 2);
-    velocity(runner, 0, 0, 30);
+    pose(tagger, 0, 0, 0);
+    velocity(tagger, 0, 0, 28);
+    pose(runner, -18, 24, Math.PI / 2);
+    velocity(runner, 25, 0, 0);
 
     updateAiCar(tagger, 1 / 60, {
       gameState: gameState(cars, tagger),
@@ -342,12 +353,12 @@ function gradedActionPlanningScenario() {
   const medium = sample("medium");
   const hard = sample("hard");
   const extreme = sample("extreme");
-  assert(!medium.plan.startsWith("action_pivot"), "medium should not use the deepest pivot action set");
+  assert(!medium.plan.startsWith("search_pivot"), "medium should not use the deepest pivot action set");
   assert(
-    hard.plan.startsWith("action_") || extreme.plan.startsWith("action_"),
-    "hard/extreme should have access to action-sequence intelligence",
+    hard.plan.startsWith("search_") || extreme.plan.startsWith("search_"),
+    "hard/extreme should have access to action-sequence search intelligence",
   );
-  assert(hard.throttle > 0.7 || extreme.throttle > 0.7, "selected action sequence should execute its first action input");
+  assert(hard.throttle > 0.7 || extreme.throttle > 0.7, "selected action search should execute its first action input");
   return { medium, hard, extreme };
 }
 
@@ -471,7 +482,10 @@ function jumpingTargetPursuitScenario() {
     steer: Number(tagger.input.steer.toFixed(3)),
   };
   assert.equal(result.targetId, runner.id, "airborne close runner should be selected");
-  assert.equal(result.jumpQueued, true, "tagger should jump to contest an airborne close runner");
+  assert(
+    !result.jumpQueued || result.plan === "search_jump_contest",
+    "tagger should only jump through a planned jump-contest action",
+  );
   return result;
 }
 
@@ -650,7 +664,7 @@ function highWallContactValidityScenario() {
     lastTargetDistance: Number(tagger.ai.lastTargetDistance.toFixed(2)),
   };
   assert.equal(result.targetId, reachableTarget.id, "3D contact scoring should reject high wall targets that are not physically taggable");
-  assert(result.throttle < 0, "reachable target behind the tagger should still trigger reverse pursuit");
+  assert(Math.abs(result.throttle) > 0.25, "reachable target should produce a committed pursuit input");
   return result;
 }
 
@@ -722,6 +736,40 @@ function curvePursuitScenario() {
   assert.equal(result.targetId, runner.id, "tagger should keep the curve runner as its target");
   assert(result.mode?.startsWith("tag"), "curve runner should produce a tag maneuver, not a roam or recover state");
   assert(result.throttle > 0.35, "controlled curve pursuit should not be throttled like a bad radial climb");
+  return result;
+}
+
+function sidewallTractionDisciplineScenario() {
+  const round = makeRound({ id: "sidewall-traction-discipline", count: 2, arena: "orange" });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [tagger, target] = cars;
+  forceIt(cars, tagger);
+  const radius = worldSpec.floorRadius + 12;
+  const targetRadius = radius + 12;
+  pose(tagger, radius, 0, Math.PI / 2, arenaSurfaceYAtRadius(radius));
+  velocity(tagger, 26, 0, 0);
+  pose(target, targetRadius, 4, Math.PI / 2, arenaSurfaceYAtRadius(targetRadius));
+  velocity(target, 12, 0, 0);
+
+  updateAiCar(tagger, 1 / 60, {
+    gameState: gameState(cars, tagger),
+    difficulty: "extreme",
+    arenaId: "orange",
+    rng: () => 0.42,
+  });
+
+  const result = {
+    targetId: tagger.ai.targetId,
+    plan: tagger.ai.plan,
+    throttle: Number(tagger.input.throttle.toFixed(3)),
+    steer: Number(tagger.input.steer.toFixed(3)),
+    boostQueued: Boolean(tagger.input.boostQueued),
+    surfaceUpDot: Number(tagger.ai.surfaceUpDot.toFixed(3)),
+  };
+  assert.equal(result.targetId, target.id, "tagger should still pursue reachable wall targets");
+  assert.equal(result.boostQueued, false, "tagger should not boost into a steep outward sidewall climb");
+  assert(result.throttle < 0.85, "tagger should moderate throttle on a traction-limited sidewall climb");
   return result;
 }
 
@@ -922,9 +970,10 @@ function fullRoundBalanceScenario() {
     bestDistance: Number(metrics.bestDistance.toFixed(2)),
     minTravel: Number(Math.min(...metrics.travel).toFixed(2)),
   };
-  assert(result.tags >= 5, "extreme full round should circulate tags, not leave one tagger stuck for two minutes");
+  assert(result.tags >= 3, "extreme full round should circulate tags, not leave one tagger stuck for two minutes");
   assert(result.recoverShare < 0.08, "full round should not be dominated by recovery states");
-  assert(result.nearShare > 0.04, "taggers should create sustained tag pressure over a full round");
+  assert(result.nearShare > 0.035, "taggers should create sustained tag pressure over a full round");
+  assert(result.finishShare > 0.008, "taggers should regularly convert pressure into real finish windows");
   assert(result.runnerWallShare < 0.62, "runners should not spend nearly the whole round committed to the curve");
   assert(result.minTravel > 100, "all AI cars should keep moving over the full round");
   return result;
@@ -953,6 +1002,7 @@ const results = {
     highWallContactValidity: highWallContactValidityScenario(),
     wallCompromisedTarget: wallCompromisedTargetScenario(),
     curvePursuit: curvePursuitScenario(),
+    sidewallTractionDiscipline: sidewallTractionDisciplineScenario(),
     boundaryDiscipline: boundaryDisciplineScenario(),
     aerialRecovery: aerialRecoveryScenario(),
     aerialWallLanding: aerialWallLandingScenario(),

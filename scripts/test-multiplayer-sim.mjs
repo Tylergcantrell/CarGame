@@ -5,7 +5,7 @@ import {
   mergeInput,
   tickSim,
 } from "../server/shared/cannon-multiplayer-sim.js";
-import { spawnHeight, wheelPositions } from "../server/shared/vehicle-config.js";
+import { spawnHeight, vehicleTuning, wheelPositions } from "../server/shared/vehicle-config.js";
 
 const physicsStep = 1 / 90;
 
@@ -71,6 +71,18 @@ queued.sim.inputs.set("a", mergeInput({ throttle: 1, jumpQueued: true }, { throt
 assert.equal(queued.sim.inputs.get("a").jumpQueued, true, "queued jump should merge until a sim step consumes it");
 tickSim(queued, 1000 / 60);
 assert.equal(queued.sim.inputs.get("a").jumpQueued, false, "queued jump should clear after a sim step");
+
+const boostRound = makeRound();
+boostRound.sim = createSimState(boostRound, { now: 0, rng: () => 0 });
+boostRound.sim.inputs.set("a", { throttle: 1, steer: 0, boostQueued: true });
+tickSim(boostRound, 1000 / 60);
+const boostedSnapshot = makeSnapshot("TEST", boostRound, 1000 / 60);
+const boostedPlayer = boostedSnapshot.cars.find((car) => car.sessionId === "a");
+assert(
+  boostedPlayer.boostTimeRemaining > vehicleTuning.boostDuration - 0.05,
+  "snapshot should expose active boost time when boost force is being applied",
+);
+assert(boostedPlayer.boostCooldownRemaining > 0, "snapshot should expose boost cooldown after boost activation");
 
 const staleInput = makeRound();
 staleInput.sim = createSimState(staleInput, { now: 0, rng: () => 0 });
