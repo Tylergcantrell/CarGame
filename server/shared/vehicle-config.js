@@ -65,7 +65,7 @@ export const vehicleTuning = {
   manualRightingClearance: 0.28,
   manualRightingPopVelocity: 2.8,
   tagImmunityDuration: 1.6,
-  itSpeedMultiplier: 1.1,
+  itSpeedMultiplier: 1.15,
   boostForce: 7000,
   boostDuration: 0.6,
   boostCooldown: 15,

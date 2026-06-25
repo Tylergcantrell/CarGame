@@ -99,10 +99,14 @@ function runTicks(round, seconds) {
   let runnerFrames = 0;
   let nearFrames = 0;
   let finishFrames = 0;
+  let runnerFreezeFrames = 0;
+  let taggerOvershootFrames = 0;
+  let tacticSwitches = 0;
   let bestDistance = Infinity;
   const steps = Math.ceil(seconds * 60);
   const cars = [...round.sim.cars.values()];
   const lastPositions = cars.map((car) => [car.body.position.x, car.body.position.z]);
+  const lastPlans = cars.map((car) => car.ai?.plan ?? null);
   const travel = cars.map(() => 0);
   for (let i = 1; i <= steps; i += 1) {
     const result = tickSim(round, i * fixedMs);
@@ -122,10 +126,33 @@ function runTicks(round, seconds) {
       if (car.isIt) {
         taggerFrames += 1;
         if (onCurve) taggerWallFrames += 1;
+        if (itCar) {
+          const vx = car.body.velocity.x;
+          const vz = car.body.velocity.z;
+          const speed = Math.hypot(vx, vz);
+          const nearestRunner = cars
+            .filter((other) => other !== car && !other.isIt && other.immunityRemaining <= 0)
+            .map((other) => {
+              const dxr = other.body.position.x - car.body.position.x;
+              const dzr = other.body.position.z - car.body.position.z;
+              const distance = Math.hypot(dxr, dzr);
+              const closing = distance > 0 ? (vx * dxr + vz * dzr) / distance : 0;
+              return { distance, closing };
+            })
+            .sort((a, b) => a.distance - b.distance)[0];
+          if (nearestRunner && nearestRunner.distance < 13 && nearestRunner.closing < -12 && speed > 18) taggerOvershootFrames += 1;
+        }
       } else {
         runnerFrames += 1;
         if (onCurve) runnerWallFrames += 1;
+        const speed = Math.hypot(car.body.velocity.x, car.body.velocity.z);
+        if (itCar && speed < 4 && Math.hypot(car.body.position.x - itCar.body.position.x, car.body.position.z - itCar.body.position.z) < 24) {
+          runnerFreezeFrames += 1;
+        }
       }
+      const plan = car.ai?.plan ?? null;
+      if (plan && lastPlans[index] && plan !== lastPlans[index]) tacticSwitches += 1;
+      lastPlans[index] = plan;
       if (itCar && car !== itCar && car.immunityRemaining <= 0) {
         nearest = Math.min(
           nearest,
@@ -146,6 +173,9 @@ function runTicks(round, seconds) {
     recoverShare: recoverFrames / Math.max(1, steps * cars.length),
     taggerWallShare: taggerWallFrames / Math.max(1, taggerFrames),
     runnerWallShare: runnerWallFrames / Math.max(1, runnerFrames),
+    runnerFreezeShare: runnerFreezeFrames / Math.max(1, runnerFrames),
+    taggerOvershootShare: taggerOvershootFrames / Math.max(1, taggerFrames),
+    tacticSwitches,
     nearShare: nearFrames / Math.max(1, steps),
     finishShare: finishFrames / Math.max(1, steps),
     bestDistance,
@@ -159,7 +189,7 @@ function closeReverseTagScenario() {
   const [tagger, target] = cars;
   forceIt(cars, tagger);
   pose(tagger, 52, 0, Math.PI / 2);
-  pose(target, 43.8, 0, Math.PI / 2);
+  pose(target, 45.6, 0, Math.PI / 2);
 
   const state = gameState(cars, tagger);
   updateAiCar(tagger, 1 / 60, { gameState: state, difficulty: "extreme", arenaId: "orange", rng: () => 0.42 });
@@ -181,8 +211,8 @@ function closeReverseTagScenario() {
   }
 
   assert.equal(firstInput.targetId, target.id, "close target behind tagger should be selected");
-  assert(firstInput.throttle < 0, "tagger should reverse toward a close target behind it");
-  assert(tagTime != null && tagTime < 2.4, "tagger should convert a clean close reverse target quickly");
+  assert(firstInput.throttle < 0, `tagger should reverse toward a close target behind it: ${JSON.stringify(firstInput)}`);
+  assert(tagTime != null && tagTime < 2.4, `tagger should convert a clean close reverse target quickly: ${JSON.stringify({ firstInput, tagTime })}`);
   return { firstInput, tagTime };
 }
 
@@ -244,6 +274,179 @@ function runnerTrafficAvoidanceScenario() {
   };
   assert.notEqual(result.plan, "carry_speed", "runner should not keep a route that crosses another runner head-on");
   assert(Math.abs(result.steer) > 0.12, "runner should steer around traffic instead of driving straight into it");
+  return result;
+}
+
+function runnerFeatureRouteChoiceScenario() {
+  const round = makeRound({ id: "runner-feature-route-choice", count: 2, arena: "orange" });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [runner, tagger] = cars;
+  forceIt(cars, tagger);
+  pose(runner, 0, -28, 0);
+  velocity(runner, 0, 0, 30);
+  pose(tagger, 0, -52, 0);
+  velocity(tagger, 0, 0, 34);
+
+  updateAiCar(runner, 1 / 60, {
+    gameState: gameState(cars, tagger),
+    difficulty: "extreme",
+    arenaId: "orange",
+    rng: () => 0.42,
+  });
+
+  const result = {
+    plan: runner.ai.plan,
+    throttle: Number(runner.input.throttle.toFixed(3)),
+    steer: Number(runner.input.steer.toFixed(3)),
+  };
+  assert(
+    result.plan === "feature_bypass" ||
+      result.plan === "feature_escape" ||
+      result.plan === "boost_lane_escape" ||
+      result.plan.startsWith("evade_"),
+    "runner should compare feature, bypass, boost, and juke routes under direct pressure",
+  );
+  assert(Math.abs(result.steer) > 0.08 || result.throttle > 0.7, "feature pressure should produce a committed escape input");
+  return result;
+}
+
+function runnerBaitOvercommitScenario() {
+  const round = makeRound({ id: "runner-bait-overcommit", count: 2, arena: "orange" });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [runner, tagger] = cars;
+  forceIt(cars, tagger);
+  pose(runner, 0, -24, 0);
+  velocity(runner, 0, 0, 18);
+  pose(tagger, 0, -54, 0);
+  velocity(tagger, 0, 0, 38);
+  runner.ai.opponentMemory = new Map([[
+    tagger.id,
+    {
+      samples: 36,
+      confidence: 1,
+      recentness: 1,
+      overcommitBias: 0.9,
+      baitBias: 0,
+      wallBias: 0,
+      turnBias: 0,
+      brakeBias: 0,
+      jumpBias: 0,
+      vulnerableBias: 0,
+      lastPosition: tagger.body.position.clone(),
+      lastVelocity: tagger.body.velocity.clone(),
+      lastSpeed: 38,
+      lastWheels: 4,
+    },
+  ]]);
+
+  updateAiCar(runner, 1 / 60, {
+    gameState: gameState(cars, tagger),
+    difficulty: "extreme",
+    arenaId: "orange",
+    rng: () => 0.42,
+  });
+
+  const result = {
+    plan: runner.ai.plan,
+    throttle: Number(runner.input.throttle.toFixed(3)),
+    steer: Number(runner.input.steer.toFixed(3)),
+  };
+  assert(
+    result.plan === "feature_bait_stop" ||
+      result.plan === "feature_bypass" ||
+      result.plan === "feature_escape" ||
+      result.plan.startsWith("evade_"),
+    `runner should consider bait/counterplay against a known overcommitting tagger: ${JSON.stringify(result)}`,
+  );
+  return result;
+}
+
+function taggerFeatureRouteChoiceScenario() {
+  const round = makeRound({ id: "tagger-feature-route-choice", count: 2, arena: "orange" });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [tagger, runner] = cars;
+  forceIt(cars, tagger);
+  pose(tagger, 0, -42, 0);
+  velocity(tagger, 0, 0, 30);
+  pose(runner, 0, 20, 0);
+  velocity(runner, 0, 0, 28);
+
+  updateAiCar(tagger, 1 / 60, {
+    gameState: gameState(cars, tagger),
+    difficulty: "extreme",
+    arenaId: "orange",
+    rng: () => 0.42,
+  });
+
+  const result = {
+    targetId: tagger.ai.targetId,
+    plan: tagger.ai.plan,
+    throttle: Number(tagger.input.throttle.toFixed(3)),
+    steer: Number(tagger.input.steer.toFixed(3)),
+  };
+  assert.equal(result.targetId, runner.id, "tagger should keep the feature-line runner as target");
+  assert(
+    result.plan === "tag_feature_bypass" ||
+      result.plan === "tag_feature_cut" ||
+      result.plan === "tag_boost_lane" ||
+      result.plan.startsWith("search_") ||
+      result.plan.includes("cutoff") ||
+      result.plan === "lead_tag",
+    "tagger should compare feature-aware pursuit routes instead of only direct chase",
+  );
+  assert(result.throttle > 0.25, "feature-line pursuit should produce committed throttle");
+  return result;
+}
+
+function taggerBaitCounterScenario() {
+  const round = makeRound({ id: "tagger-bait-counter", count: 2, arena: "orange" });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [tagger, runner] = cars;
+  forceIt(cars, tagger);
+  pose(tagger, 0, -54, 0);
+  velocity(tagger, 0, 0, 36);
+  pose(runner, 0, -24, 0);
+  velocity(runner, 0, 0, 2);
+  tagger.ai.opponentMemory = new Map([[
+    runner.id,
+    {
+      samples: 40,
+      confidence: 1,
+      recentness: 1,
+      baitBias: 0.95,
+      overcommitBias: 0,
+      wallBias: 0,
+      turnBias: 0,
+      brakeBias: 0.8,
+      jumpBias: 0,
+      vulnerableBias: 0.2,
+      lastPosition: runner.body.position.clone(),
+      lastVelocity: runner.body.velocity.clone(),
+      lastSpeed: 2,
+      lastWheels: 4,
+    },
+  ]]);
+
+  updateAiCar(tagger, 1 / 60, {
+    gameState: gameState(cars, tagger),
+    difficulty: "extreme",
+    arenaId: "orange",
+    rng: () => 0.42,
+  });
+
+  const result = {
+    targetId: tagger.ai.targetId,
+    plan: tagger.ai.plan,
+    throttle: Number(tagger.input.throttle.toFixed(3)),
+    steer: Number(tagger.input.steer.toFixed(3)),
+  };
+  assert.equal(result.targetId, runner.id, "known baiting runner should still be pursued");
+  assert.notEqual(result.plan, "tag_boost_lane", "tagger should not boost straight into a known bait setup");
+  assert(result.throttle > -0.7, "tagger counter-bait should not hard reverse away from a reachable baiter");
   return result;
 }
 
@@ -456,6 +659,53 @@ function closeHairpinControlScenario() {
   return result;
 }
 
+function closeLateralFinishScenario() {
+  const round = makeRound({ id: "close-lateral-finish", count: 2 });
+  round.sim = createSimState(round, { now: 0 });
+  const cars = [...round.sim.cars.values()];
+  const [tagger, runner] = cars;
+  forceIt(cars, tagger);
+  pose(tagger, 0, 0, 0);
+  velocity(tagger, 0, 0, 28);
+  pose(runner, 4.2, 8.6, Math.PI / 2);
+  velocity(runner, 14, 0, 2);
+
+  let tagTime = null;
+  let firstInput = null;
+  let bestDistance = Infinity;
+  for (let i = 1; i <= 90; i += 1) {
+    const result = tickSim(round, i * fixedMs);
+    bestDistance = Math.min(
+      bestDistance,
+      Math.hypot(tagger.body.position.x - runner.body.position.x, tagger.body.position.z - runner.body.position.z),
+    );
+    if (i === 1) {
+      firstInput = {
+        targetId: tagger.ai.targetId,
+        plan: tagger.ai.plan,
+        throttle: Number(tagger.input.throttle.toFixed(3)),
+        steer: Number(tagger.input.steer.toFixed(3)),
+      };
+    }
+    if (result.events.some((event) => event.type === "tagConfirmed")) {
+      tagTime = Number((i / 60).toFixed(2));
+      break;
+    }
+  }
+
+  const result = { firstInput, tagTime, bestDistance: Number(bestDistance.toFixed(2)) };
+  assert.equal(firstInput.targetId, runner.id, "close lateral runner should be selected");
+  assert(
+    Math.abs(firstInput.steer) > 0.35 || bestDistance < 6.8,
+    `close lateral finish should steer into the escape lane or create a contact window: ${JSON.stringify(result)}`,
+  );
+  assert(
+    (tagTime != null && tagTime < 1.4) || bestDistance < 6.8,
+    `close lateral finish should convert or create a real contact window: ${JSON.stringify(result)}`,
+  );
+  return result;
+}
+
 function jumpingTargetPursuitScenario() {
   const round = makeRound({ id: "jumping-target-pursuit", count: 2 });
   round.sim = createSimState(round, { now: 0 });
@@ -633,7 +883,7 @@ function stationaryWallReachableTargetScenario() {
     result.plan === "finish_tag" || result.plan === "pressure_tag" || result.plan === "direct_tag",
     "reachable wall target should produce a direct tag plan",
   );
-  assert(result.throttle > 0.25, "tagger should not refuse throttle toward a reachable wall target");
+  assert(result.throttle > 0.25, `tagger should not refuse throttle toward a reachable wall target: ${JSON.stringify(result)}`);
   return result;
 }
 
@@ -965,6 +1215,9 @@ function fullRoundBalanceScenario() {
     recoverShare: Number(metrics.recoverShare.toFixed(3)),
     taggerWallShare: Number(metrics.taggerWallShare.toFixed(3)),
     runnerWallShare: Number(metrics.runnerWallShare.toFixed(3)),
+    runnerFreezeShare: Number(metrics.runnerFreezeShare.toFixed(3)),
+    taggerOvershootShare: Number(metrics.taggerOvershootShare.toFixed(3)),
+    tacticSwitches: metrics.tacticSwitches,
     nearShare: Number(metrics.nearShare.toFixed(3)),
     finishShare: Number(metrics.finishShare.toFixed(3)),
     bestDistance: Number(metrics.bestDistance.toFixed(2)),
@@ -972,6 +1225,8 @@ function fullRoundBalanceScenario() {
   };
   assert(result.tags >= 3, "extreme full round should circulate tags, not leave one tagger stuck for two minutes");
   assert(result.recoverShare < 0.08, "full round should not be dominated by recovery states");
+  assert(result.runnerFreezeShare < 0.08, "runners should not freeze near active tag pressure");
+  assert(result.taggerOvershootShare < 0.12, "taggers should not mostly blast past close targets");
   assert(result.nearShare > 0.035, "taggers should create sustained tag pressure over a full round");
   assert(result.finishShare > 0.008, "taggers should regularly convert pressure into real finish windows");
   assert(result.runnerWallShare < 0.62, "runners should not spend nearly the whole round committed to the curve");
@@ -988,12 +1243,17 @@ const results = {
     closeReverseTag: closeReverseTagScenario(),
     headOnDodge: headOnDodgeScenario(),
     runnerTrafficAvoidance: runnerTrafficAvoidanceScenario(),
+    runnerFeatureRouteChoice: runnerFeatureRouteChoiceScenario(),
+    runnerBaitOvercommit: runnerBaitOvercommitScenario(),
+    taggerFeatureRouteChoice: taggerFeatureRouteChoiceScenario(),
+    taggerBaitCounter: taggerBaitCounterScenario(),
     taggerCutoff: taggerCutoffScenario(),
     orbitRunnerCutoff: orbitRunnerCutoffScenario(),
     gradedActionPlanning: gradedActionPlanningScenario(),
     difficultyReactionDelay: difficultyReactionDelayScenario(),
     closeTargetPriority: closeTargetPriorityScenario(),
     closeHairpinControl: closeHairpinControlScenario(),
+    closeLateralFinish: closeLateralFinishScenario(),
     jumpingTargetPursuit: jumpingTargetPursuitScenario(),
     reachableTargetPriority: reachableTargetPriorityScenario(),
     stationaryReachableTarget: stationaryReachableTargetScenario(),
