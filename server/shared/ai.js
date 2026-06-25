@@ -10,6 +10,8 @@ const tmpVec3A = new THREE.Vector3();
 const tmpVec3B = new THREE.Vector3();
 const tmpVec3C = new THREE.Vector3();
 const tmpVec3D = new THREE.Vector3();
+const tmpVec3E = new THREE.Vector3();
+const tmpVec3F = new THREE.Vector3();
 const tmpQuat = new THREE.Quaternion();
 
 export const aiDifficultyPresets = {
@@ -150,7 +152,9 @@ function ensureMind(car, rng) {
   ai.lateralTimer = finite(ai.lateralTimer, 1 + rng() * 2);
   ai.perceptionClock = finite(ai.perceptionClock);
   ai.perceptionSampleClock = finite(ai.perceptionSampleClock);
+  ai.memorySampleClock = finite(ai.memorySampleClock);
   ai.perceptionHistory ??= [];
+  ai.opponentMemory ??= new Map();
   return aiPersonalities.find((personality) => personality.key === ai.personalityKey) ?? aiPersonalities[0];
 }
 
@@ -327,7 +331,7 @@ function mobility(car, surfaceNormal = WORLD_UP) {
   return clamp01(wheelScore * 0.5 + speedScore * 0.2 + uprightScore * 0.3);
 }
 
-function relativeCar(self, other, ranks, config, rng, arenaContactForPoint) {
+function relativeCar(self, other, ranks, config, rng, arenaContactForPoint, memory = null) {
   const selfPos = carPosition(self, tmpVec3A);
   const otherPos = carPosition(other, tmpVec3B);
   const delta = tmpVec3C.copy(otherPos).sub(selfPos);
@@ -363,6 +367,8 @@ function relativeCar(self, other, ranks, config, rng, arenaContactForPoint) {
     surfaceNormal: otherContact.normal,
     surfaceDistance: otherContact.distance,
     surfaceResolver: arenaContactForPoint,
+    hypothesisCache: new Map(),
+    memory,
     wheels: finite(other.vehicle?.numWheelsOnGround),
     immunity: Math.max(0, finite(other.immunityRemaining)),
   };
@@ -389,10 +395,13 @@ function crowdVector(car, others) {
   return { escape, pressure: clamp01(pressure / 1.8), nearest };
 }
 
-function observe(car, gameState, config, rng, arenaId, arenaContactForPoint) {
+function observe(car, gameState, config, rng, arenaId, arenaContactForPoint, ai = car.ai) {
   const cars = Array.isArray(gameState.cars) ? gameState.cars.filter(Boolean) : [car];
   const ranks = rankCars(cars);
-  const others = cars.filter((other) => other !== car).map((other) => relativeCar(car, other, ranks, config, rng, arenaContactForPoint));
+  const memories = ai?.opponentMemory;
+  const others = cars.filter((other) => other !== car).map((other) =>
+    relativeCar(car, other, ranks, config, rng, arenaContactForPoint, memories?.get(other.id) ?? null)
+  );
   const position = carPosition(car, new THREE.Vector3());
   const velocity = carVelocity(car, new THREE.Vector3());
   const forward = flatForward(car, new THREE.Vector3());
@@ -502,6 +511,85 @@ function perceivedGameState(car, gameState, ai, config) {
   };
 }
 
+function ensureOpponentMemory(ai, id) {
+  ai.opponentMemory ??= new Map();
+  let memory = ai.opponentMemory.get(id);
+  if (!memory) {
+    memory = {
+      samples: 0,
+      wallBias: 0,
+      turnBias: 0,
+      brakeBias: 0,
+      jumpBias: 0,
+      vulnerableBias: 0,
+      lastPosition: new THREE.Vector3(),
+      lastVelocity: new THREE.Vector3(),
+      lastSpeed: 0,
+      lastWheels: 4,
+    };
+    ai.opponentMemory.set(id, memory);
+  }
+  return memory;
+}
+
+function updateOpponentMemory(car, ai, gameState, dt, arenaContactForPoint) {
+  const cars = Array.isArray(gameState.cars) ? gameState.cars.filter(Boolean) : [];
+  const seen = new Set();
+  const alpha = clamp01(dt * 1.8);
+  const floorRadius = finite(worldSpec?.floorRadius, 68);
+  const curveRadius = Math.max(1, finite(worldSpec?.curveRadius, 30));
+
+  for (const other of cars) {
+    if (other === car || other.id == null) continue;
+    seen.add(other.id);
+    const memory = ensureOpponentMemory(ai, other.id);
+    const position = carPosition(other, tmpVec3A);
+    const contact = surfaceContactForPosition(position, arenaContactForPoint, tmpVec3D);
+    const velocity = carVelocity(other, tmpVec3B);
+    velocity.addScaledVector(contact.normal, -velocity.dot(contact.normal));
+    const speed = velocity.length();
+    const radius = Math.hypot(position.x, position.z);
+    const wallSample = clamp01((radius - floorRadius + 2) / curveRadius);
+    const wheels = finite(other.vehicle?.numWheelsOnGround);
+    const upDot = carUp(other, tmpVec3C).dot(contact.normal);
+    const vulnerableSample = clamp01(
+      (wheels <= 1 ? 0.5 : wheels <= 2 ? 0.25 : 0) +
+      (1 - clamp01((upDot + 0.1) / 1.1)) * 0.45 +
+      (speed < 6 ? 0.18 : 0)
+    );
+    const jumpSample = wheels <= 1 && memory.lastWheels >= 3 ? 1 : 0;
+    let turnSample = 0;
+    let brakeSample = 0;
+    if (memory.samples > 0 && speed > 4 && memory.lastSpeed > 4) {
+      const previous = tmpVec3C.copy(memory.lastVelocity);
+      previous.addScaledVector(contact.normal, -previous.dot(contact.normal));
+      if (previous.lengthSq() > EPS) {
+        previous.normalize();
+        const current = tmpVec3A.copy(velocity).normalize();
+        turnSample = THREE.MathUtils.clamp(previous.cross(current).dot(contact.normal) * 3.2, -1, 1);
+        brakeSample = clamp01((memory.lastSpeed - speed) / Math.max(8, memory.lastSpeed * 0.45));
+        if (previous.dot(current) < -0.15) brakeSample = Math.max(brakeSample, 0.65);
+      }
+    }
+    memory.wallBias = THREE.MathUtils.lerp(memory.wallBias, wallSample, alpha);
+    memory.turnBias = THREE.MathUtils.lerp(memory.turnBias, turnSample, alpha);
+    memory.brakeBias = THREE.MathUtils.lerp(memory.brakeBias, brakeSample, alpha);
+    memory.jumpBias = THREE.MathUtils.lerp(memory.jumpBias, jumpSample, alpha);
+    memory.vulnerableBias = THREE.MathUtils.lerp(memory.vulnerableBias, vulnerableSample, alpha);
+    memory.lastPosition.copy(position);
+    memory.lastVelocity.copy(velocity);
+    memory.lastSpeed = speed;
+    memory.lastWheels = wheels;
+    memory.samples += 1;
+  }
+
+  if (ai.opponentMemory?.size > cars.length + 2) {
+    for (const id of ai.opponentMemory.keys()) {
+      if (!seen.has(id)) ai.opponentMemory.delete(id);
+    }
+  }
+}
+
 function updateMotionAwareness(car, ai, facts, dt) {
   const moved = facts.position.distanceTo(ai.lastPosition ?? facts.position);
   const effort =
@@ -581,10 +669,14 @@ function segmentDistanceToPoint3D(start, end, point) {
 
 function pointCrowding(point, facts, range = 24) {
   let score = 0;
+  const rangeSq = range * range;
   for (const other of facts.others) {
     const pos = carPosition(other.car, tmpVec3A);
-    const distance = Math.hypot(point.x - pos.x, point.z - pos.z);
-    if (distance >= range) continue;
+    const dx = point.x - pos.x;
+    const dz = point.z - pos.z;
+    const distanceSq = dx * dx + dz * dz;
+    if (distanceSq >= rangeSq) continue;
+    const distance = Math.sqrt(distanceSq);
     score += (1 - distance / range) ** 2;
   }
   return score;
@@ -594,16 +686,16 @@ function runnerTrafficCost(car, rollout, facts, horizon) {
   let cost = 0;
   for (const other of facts.others) {
     if (other.car === car || other.car.isIt) continue;
-    const otherNow = carPosition(other.car, new THREE.Vector3());
-    const otherFuture = predictPosition(other.car, horizon, new THREE.Vector3());
-    const otherMid = otherNow.clone().lerp(otherFuture, 0.5);
+    const otherNow = carPosition(other.car, tmpVec3A);
+    const otherFuture = predictPosition(other.car, horizon, tmpVec3B);
+    const otherMid = tmpVec3C.copy(otherNow).lerp(otherFuture, 0.5);
     const routeCrossing = segmentDistanceToPoint3D(facts.position, rollout.position, otherMid);
     const finalSpacing = rollout.position.distanceTo(otherFuture);
-    const otherVelocity = carVelocity(other.car, new THREE.Vector3());
+    const otherVelocity = carVelocity(other.car, tmpVec3D);
     otherVelocity.addScaledVector(other.surfaceNormal, -otherVelocity.dot(other.surfaceNormal));
-    const relativeVelocity = facts.velocity.clone().sub(otherVelocity);
+    const relativeVelocity = tmpVec3E.copy(facts.velocity).sub(otherVelocity);
     relativeVelocity.addScaledVector(facts.surfaceNormal, -relativeVelocity.dot(facts.surfaceNormal));
-    const toOther = tangentDirection(facts.position, otherNow, facts.surfaceNormal, facts.forward, new THREE.Vector3());
+    const toOther = tangentDirection(facts.position, otherNow, facts.surfaceNormal, facts.forward, tmpVec3F);
     const closing = Math.max(0, relativeVelocity.dot(toOther));
     const crossingRisk = 1 - clamp01((routeCrossing - 7.5) / 18);
     const finalRisk = 1 - clamp01((finalSpacing - 8) / 18);
@@ -624,6 +716,98 @@ function featureRiskAlong(from, to, facts) {
     risk = Math.max(risk, (1 - distance / radius) * (0.35 + height * 0.65));
   }
   return risk;
+}
+
+function featureEscapeJobs(car, facts, config) {
+  if (!facts.threat || facts.threatRisk < 0.16) return [];
+  const jobs = [];
+  const planning = clamp01(finite(config.planningSkill) / 1.35);
+  if (planning < 0.58) return jobs;
+  const threatPos = carPosition(facts.threat.car, tmpVec3E);
+  const openEscape = tmpVec3F.copy(facts.position).sub(threatPos);
+  projectOntoPlane(openEscape, facts.surfaceNormal, facts.forward);
+  let bestFeature = null;
+  let bestScore = -Infinity;
+  let bestBypassScore = -Infinity;
+  let bestBypassPoint = null;
+  for (const feature of facts.features ?? []) {
+    const fx = finite(feature.x);
+    const fz = finite(feature.z);
+    const featurePoint = tmpVec3A.set(fx, 0, fz);
+    const distance = segmentDistanceToPoint(facts.position, threatPos, featurePoint);
+    const toFeature = tmpVec3B.copy(featurePoint).sub(facts.position);
+    const featureDistance = Math.hypot(toFeature.x, toFeature.z);
+    if (featureDistance < 10 || featureDistance > THREE.MathUtils.lerp(46, 72, planning)) continue;
+    const awayFromThreat = tmpVec3C.copy(featurePoint).sub(threatPos);
+    safeNormalize(awayFromThreat, facts.forward);
+    const routeDirection = projectOntoPlane(toFeature, facts.surfaceNormal, facts.forward);
+    const escapeDot = routeDirection.dot(awayFromThreat);
+    const heightValue = clamp01((finite(feature.height, 2) - 1.2) / 6);
+    const routeBlock = 1 - clamp01((segmentDistanceToPoint(facts.position, facts.position.clone().addScaledVector(openEscape, 56), featurePoint) - 4) / 22);
+    const airTimeCost = heightValue * THREE.MathUtils.lerp(12, 38, clamp01(facts.speed / 42)) * THREE.MathUtils.lerp(0.5, 1.1, clamp01((facts.threat.contactDistance - TAG_RANGE) / 30));
+    const momentumNeed = clamp01(facts.speed / 38) * clamp01((facts.threat.contactDistance - TAG_RANGE) / 28);
+    const score =
+      (1 - clamp01((distance - 8) / 34)) * 34 +
+      escapeDot * 42 +
+      heightValue * 30 -
+      airTimeCost -
+      clamp01((featureDistance - 22) / 52) * 18;
+    if (score > bestScore) {
+      bestScore = score;
+      bestFeature = feature;
+    }
+    const bypassScore = routeBlock * 38 + momentumNeed * 26 + heightValue * 18 + escapeDot * 10;
+    if (bypassScore > bestBypassScore && routeBlock > 0.18) {
+      const around = perpendicular(routeDirection, Math.sign(routeDirection.cross(awayFromThreat).dot(facts.surfaceNormal)) || car.ai.lateralSign || 1, tmpVec3C, facts.surfaceNormal);
+      const clearance = Math.max(finite(feature.width, 16), finite(feature.length, 16)) * 0.55 + 12;
+      bestBypassPoint = featurePoint.clone().addScaledVector(around, clearance).addScaledVector(openEscape, 18 + momentumNeed * 18);
+      bestBypassScore = bypassScore;
+    }
+  }
+  if (bestBypassPoint && bestBypassScore > 18) {
+    jobs.push(makeJob({
+      type: "run",
+      point: bestBypassPoint,
+      threat: facts.threat,
+      desiredSpeed: 45,
+      urgency: Math.max(0.22, facts.threatRisk),
+      plan: "feature_bypass",
+      score: bestBypassScore * 0.82,
+    }));
+  }
+  if (!bestFeature || bestScore < 14) return jobs;
+
+  const center = tmpVec3A.set(finite(bestFeature.x), 0, finite(bestFeature.z));
+  const threatAway = tmpVec3B.copy(center).sub(threatPos);
+  projectOntoPlane(threatAway, facts.surfaceNormal, facts.forward);
+  const featureYaw = finite(bestFeature.yaw);
+  const along = tmpVec3C.set(Math.sin(featureYaw), 0, Math.cos(featureYaw));
+  projectOntoPlane(along, facts.surfaceNormal, facts.forward);
+  const side = Math.sign(along.dot(threatAway)) || car.ai.lateralSign || 1;
+  const crestDistance = Math.max(finite(bestFeature.width, 16), finite(bestFeature.length, 16)) * 0.28;
+  const exitDistance = Math.max(finite(bestFeature.width, 16), finite(bestFeature.length, 16)) * 0.42;
+
+  const crest = center.clone().addScaledVector(along, side * crestDistance).addScaledVector(threatAway, 8);
+  const exit = center.clone().addScaledVector(along, side * exitDistance).addScaledVector(threatAway, 24);
+  jobs.push(makeJob({
+    type: "run",
+    point: crest,
+    threat: facts.threat,
+    desiredSpeed: 42,
+    urgency: Math.max(0.24, facts.threatRisk),
+    plan: "feature_cut",
+    score: bestScore * 0.62,
+  }));
+  jobs.push(makeJob({
+    type: "run",
+    point: exit,
+    threat: facts.threat,
+    desiredSpeed: 44,
+    urgency: Math.max(0.28, facts.threatRisk),
+    plan: "feature_escape",
+    score: bestScore * 0.86,
+  }));
+  return jobs;
 }
 
 function surfaceRisk(point, facts, direction = null) {
@@ -849,6 +1033,10 @@ function tagStrategicValue(target, facts, config, personality) {
 
 function tagEaseValue(target) {
   const contact = finite(target.contactDistance, target.distance);
+  const memory = target.memory;
+  const learnedVulnerability = memory && finite(memory.samples) > 8
+    ? clamp01(finite(memory.vulnerableBias)) * 48 + clamp01(finite(memory.brakeBias)) * 18
+    : 0;
   const reach = (1 - clamp01((contact - TAG_RANGE) / 54)) * 130;
   const immediate = contact < TAG_RANGE + 8 ? (TAG_RANGE + 8 - contact) * 30 : 0;
   const closing = THREE.MathUtils.clamp(finite(target.closing), -20, 36) * 1.5;
@@ -857,7 +1045,118 @@ function tagEaseValue(target) {
     (finite(target.wheels, 4) <= 1 ? 34 : finite(target.wheels, 4) <= 2 ? 16 : 0) +
     (finite(target.upDot, 1) < 0.55 ? 24 : 0) +
     (finite(target.speed) < 7 ? 18 : 0);
-  return reach + immediate + closing + weakState;
+  return reach + immediate + closing + weakState + learnedVulnerability;
+}
+
+function tagMultiAgentOpportunity(target, job, facts, horizon) {
+  if (!Array.isArray(facts.runners) || facts.runners.length <= 1) return 0;
+  let opportunity = 0;
+  for (const other of facts.runners) {
+    if (other.id === target.id || other.immunity > 0) continue;
+    const otherFuture = opponentHypothesisPositions(other, horizon)[0];
+    const routeDistance = segmentDistanceToPoint3D(facts.position, job.point, otherFuture);
+    const finishDistance = job.point.distanceTo(otherFuture);
+    const nearRoute = 1 - clamp01((routeDistance - TAG_RANGE) / 22);
+    const nearFinish = 1 - clamp01((finishDistance - TAG_RANGE) / 24);
+    const mobilityBonus = 1 - finite(other.mobility, 1);
+    const rankPressure = clamp01((facts.selfRank - other.rank + 2) / 5);
+    opportunity = Math.max(
+      opportunity,
+      nearRoute * 18 + nearFinish * 28 + mobilityBonus * 18 + rankPressure * 10,
+    );
+  }
+  return opportunity;
+}
+
+function tagFeatureInterceptJobs(target, facts, config, future, forward, side) {
+  const planning = clamp01(finite(config.planningSkill) / 1.35);
+  if (planning < 0.64 || target.contactDistance < TAG_RANGE + 8) return [];
+  const jobs = [];
+  let bestBypassPoint = null;
+  let bestBypassScore = -Infinity;
+  let bestCutPoint = null;
+  let bestCutScore = -Infinity;
+  const directDirection = tmpVec3F.copy(future).sub(facts.position);
+  projectOntoPlane(directDirection, facts.surfaceNormal, facts.forward);
+
+  for (const feature of facts.features ?? []) {
+    const featurePoint = tmpVec3A.set(finite(feature.x), 0, finite(feature.z));
+    const featureDistance = segmentDistanceToPoint(facts.position, future, featurePoint);
+    const influence = 1 - clamp01((featureDistance - 5) / 24);
+    if (influence <= 0) continue;
+
+    const heightValue = clamp01((finite(feature.height, 2) - 1.2) / 6);
+    const aroundSign = Math.sign(tmpVec3E.copy(directDirection).cross(tmpVec3B.copy(future).sub(featurePoint)).dot(facts.surfaceNormal)) || side || 1;
+    const around = perpendicular(directDirection, aroundSign, tmpVec3C, facts.surfaceNormal);
+    const clearance = Math.max(finite(feature.width, 16), finite(feature.length, 16)) * 0.55 + 10;
+    const bypass = featurePoint.clone().addScaledVector(around, clearance).addScaledVector(forward, 10);
+    const bypassDistance = facts.position.distanceTo(bypass) + bypass.distanceTo(future);
+    const directDistance = facts.position.distanceTo(future);
+    const targetSpeed = clamp01(target.speed / 36);
+    const bypassScore =
+      influence * 50 +
+      heightValue * 20 +
+      targetSpeed * 24 -
+      clamp01((bypassDistance - directDistance - 8) / 38) * 36;
+    if (bypassScore > bestBypassScore) {
+      bestBypassScore = bypassScore;
+      bestBypassPoint = bypass;
+    }
+
+    const featureYaw = finite(feature.yaw);
+    const along = tmpVec3D.set(Math.sin(featureYaw), 0, Math.cos(featureYaw));
+    projectOntoPlane(along, facts.surfaceNormal, facts.forward);
+    const cutPoint = featurePoint.clone()
+      .addScaledVector(along, aroundSign * Math.max(finite(feature.length, 18), finite(feature.width, 18)) * 0.32)
+      .addScaledVector(forward, 12);
+    const cutScore =
+      influence * 30 +
+      heightValue * 16 +
+      clamp01((target.contactDistance - 18) / 34) * 20 -
+      clamp01(facts.speed / 44) * heightValue * 24;
+    if (cutScore > bestCutScore) {
+      bestCutScore = cutScore;
+      bestCutPoint = cutPoint;
+    }
+  }
+
+  if (bestBypassPoint && bestBypassScore > 14) {
+    jobs.push(makeJob({
+      type: "tag",
+      point: bestBypassPoint,
+      target,
+      desiredSpeed: 44,
+      urgency: 0.72,
+      plan: "tag_feature_bypass",
+      score: bestBypassScore * 0.75,
+      horizon: THREE.MathUtils.lerp(0.9, 1.45, planning),
+    }));
+  }
+  if (bestCutPoint && bestCutScore > 16) {
+    jobs.push(makeJob({
+      type: "tag",
+      point: bestCutPoint,
+      target,
+      desiredSpeed: 42,
+      urgency: 0.68,
+      plan: "tag_feature_cut",
+      score: bestCutScore * 0.7,
+      horizon: THREE.MathUtils.lerp(0.82, 1.25, planning),
+    }));
+  }
+  return jobs;
+}
+
+function tagTargetPriority(target, facts, config, personality) {
+  if (target.immunity > 0) return -Infinity;
+  const distanceValue = (1 - clamp01((target.contactDistance - TAG_RANGE) / 70)) * 120;
+  const mobilityValue = (1 - finite(target.mobility, 1)) * 50;
+  const learnedValue = target.memory && finite(target.memory.samples) > 8
+    ? clamp01(finite(target.memory.vulnerableBias)) * 38 + clamp01(finite(target.memory.brakeBias)) * 16
+    : 0;
+  const strategicValue = tagStrategicValue(target, facts, config, personality) * 0.72;
+  const closingValue = THREE.MathUtils.clamp(finite(target.closing), -18, 30) * 1.1;
+  return distanceValue + mobilityValue + learnedValue + strategicValue + closingValue;
 }
 
 function predictOrbitPosition(position, velocity, seconds, out = new THREE.Vector3()) {
@@ -887,8 +1186,6 @@ function predictOpponentHypothesis(entry, seconds, kind, out = new THREE.Vector3
   const turnSign = kind === "turn_left" ? 1 : kind === "turn_right" ? -1 : 0;
 
   for (let i = 0; i < steps; i += 1) {
-    const contact = surfaceContactForPosition(pos, resolver, tmpVec3D);
-    normal = contact.normal;
     velocity.addScaledVector(normal, -velocity.dot(normal));
     if (turnSign) velocity.applyAxisAngle(normal, turnSign * 1.15 * dt);
     else if (kind === "brake_reverse") {
@@ -900,6 +1197,7 @@ function predictOpponentHypothesis(entry, seconds, kind, out = new THREE.Vector3
     pos.addScaledVector(velocity, dt);
     clampArenaPoint(pos, 4);
     const projected = surfaceContactForPosition(pos, resolver, tmpVec3D);
+    normal = projected.normal;
     if (Math.abs(projected.distance) < 3) {
       pos.y = finite(projected.point?.y, arenaSurfaceYAt(pos));
     }
@@ -908,9 +1206,38 @@ function predictOpponentHypothesis(entry, seconds, kind, out = new THREE.Vector3
 }
 
 function opponentHypothesisPositions(entry, seconds) {
-  return ["continue", "turn_left", "turn_right", "brake_reverse"].map((kind) =>
+  const key = Math.round(seconds * 1000);
+  const cache = entry.hypothesisCache;
+  if (cache?.has(key)) return cache.get(key);
+  const positions = ["continue", "turn_left", "turn_right", "brake_reverse"].map((kind) =>
     predictOpponentHypothesis(entry, seconds, kind, new THREE.Vector3())
   );
+  cache?.set(key, positions);
+  return positions;
+}
+
+function opponentHypothesisWeights(entry) {
+  if (entry.hypothesisWeights) return entry.hypothesisWeights;
+  const memory = entry.memory;
+  if (!memory || finite(memory.samples) < 8) {
+    entry.hypothesisWeights = [1, 1, 1, 1];
+    return entry.hypothesisWeights;
+  }
+  const turnBias = THREE.MathUtils.clamp(finite(memory.turnBias), -1, 1);
+  const brakeBias = clamp01(finite(memory.brakeBias));
+  const jumpBias = clamp01(finite(memory.jumpBias));
+  const wallBias = clamp01(finite(memory.wallBias));
+  const left = 1 + Math.max(0, turnBias) * 1.25;
+  const right = 1 + Math.max(0, -turnBias) * 1.25;
+  const reverse = 0.82 + brakeBias * 1.45 + jumpBias * 0.45;
+  const carry = 1.18 + clamp01(entry.speed / 32) * 0.35 + wallBias * 0.18 - brakeBias * 0.45;
+  entry.hypothesisWeights = [
+    Math.max(0.32, carry),
+    Math.max(0.28, left),
+    Math.max(0.28, right),
+    Math.max(0.28, reverse),
+  ];
+  return entry.hypothesisWeights;
 }
 
 function tagControlSearchTemplates(config, target, facts) {
@@ -971,7 +1298,9 @@ function runnerControlSearchTemplates(car, config, facts) {
   ];
   if (planning >= 0.72) {
     templates.push(
+      { label: "evade_late_hook", horizon: 0.68, sequence: [{ duration: 0.16, steer: steerAway * 0.3, throttle: 1 }, { duration: 0.22, steer: -side, throttle: 0.82 }, { duration: 0.3, steer: side * 0.9, throttle: 1 }] },
       { label: "evade_brake_juke", horizon: 0.72, sequence: [{ duration: 0.18, steer: -side, throttle: -0.35 }, { duration: 0.54, steer: side, throttle: 1 }] },
+      { label: "evade_snapback", horizon: 0.66, sequence: [{ duration: 0.18, steer: side, throttle: 1 }, { duration: 0.16, steer: -side, throttle: -0.18 }, { duration: 0.32, steer: -side * 0.85, throttle: 1 }] },
       ...(canBoost(steerAway * 0.74) && facts.threatRisk > 0.18 ? [{ label: "evade_boost_escape", horizon: 0.7, sequence: [{ duration: 0.7, steer: steerAway * 0.74, throttle: 1, boost: true }] }] : []),
     );
   }
@@ -1045,6 +1374,27 @@ function tagCandidatesForTarget(car, target, facts, config) {
     urgency: 0.56,
     plan: "cross_tag",
   }));
+  jobs.push(...tagFeatureInterceptJobs(target, facts, config, future, forward, side));
+  if (planning > 0.72 && target.contactDistance > TAG_RANGE + 14 && canBoostNow(facts, config, 0)) {
+    const boostPoint = future.clone().addScaledVector(forward, 10 + speed * 0.12);
+    projectArenaSurfacePoint(boostPoint, facts, 4);
+    const boostDirection = surfaceDirectionToPoint(facts.position, boostPoint, facts, tmpVec3D);
+    const boostRouteRisk =
+      featureRiskAlong(facts.position, boostPoint, facts) * 0.7 +
+      surfaceRisk(boostPoint, facts, boostDirection);
+    if (boostRouteRisk < THREE.MathUtils.lerp(0.38, 0.64, planning)) {
+      jobs.push(makeJob({
+        type: "tag",
+        point: boostPoint,
+        target,
+        desiredSpeed: 52,
+        urgency: 0.84,
+        plan: "tag_boost_lane",
+        horizon: THREE.MathUtils.lerp(0.72, 1.08, planning),
+        score: 28 + clamp01((target.contactDistance - TAG_RANGE - 12) / 44) * 34,
+      }));
+    }
+  }
   if (target.contactDistance > 22 && speed > 8 && planning > 0.62) {
     const longHorizons = [
       THREE.MathUtils.lerp(1.25, 1.65, planning),
@@ -1077,6 +1427,56 @@ function tagCandidatesForTarget(car, target, facts, config) {
         plan: "arc_pinch_tag",
         horizon,
       }));
+    }
+  }
+  const adaptiveSignal = target.memory
+    ? Math.max(Math.abs(finite(target.memory.turnBias)), finite(target.memory.brakeBias), finite(target.memory.vulnerableBias))
+    : 0;
+  if (target.contactDistance > 20 && planning > 0.72 && finite(target.memory?.samples) > 12 && adaptiveSignal > 0.18) {
+    const adaptiveHorizons = planning > 0.9
+      ? [1.15, 1.8, 2.55]
+      : planning > 0.75
+        ? [1.0, 1.55]
+        : [1.1];
+    const maxFutures = planning > 0.9 ? 2 : 1;
+    for (const horizon of adaptiveHorizons) {
+      const futures = opponentHypothesisPositions(target, horizon);
+      const weights = opponentHypothesisWeights(target);
+      const chosen = [-1, -1, -1];
+      for (let pick = 0; pick < maxFutures; pick += 1) {
+        let bestIndex = -1;
+        let bestWeight = -Infinity;
+        for (let i = 0; i < futures.length; i += 1) {
+          if (chosen.includes(i)) continue;
+          const weight = finite(weights[i], 1);
+          if (weight > bestWeight) {
+            bestWeight = weight;
+            bestIndex = i;
+          }
+        }
+        chosen[pick] = bestIndex;
+        if (bestIndex < 0) continue;
+        const adaptiveFuture = tmpVec3E.copy(futures[bestIndex]);
+        projectArenaSurfacePoint(adaptiveFuture, facts, 4);
+        const futureForward = targetForward(target, tmpVec3F);
+        const adaptiveInward = inwardDirection(adaptiveFuture, new THREE.Vector3(), facts.surfaceNormal);
+        const toAdaptive = tangentDirection(facts.position, adaptiveFuture, facts.surfaceNormal, facts.forward, new THREE.Vector3());
+        const adaptiveSide = Math.sign(toAdaptive.cross(futureForward).dot(facts.surfaceNormal)) || side;
+        const adaptiveLateral = perpendicular(futureForward, adaptiveSide, new THREE.Vector3(), facts.surfaceNormal);
+        const pressure = clamp01(bestWeight / 2.4);
+        jobs.push(makeJob({
+          type: "tag",
+          point: adaptiveFuture
+            .addScaledVector(adaptiveInward, 10 + horizon * 4 + pressure * 8)
+            .addScaledVector(adaptiveLateral, (6 + horizon * 3) * (bestIndex === 3 ? -1 : 1))
+            .addScaledVector(futureForward, 5 + horizon * 2),
+          target,
+          desiredSpeed: 40 + horizon * 2,
+          urgency: 0.68 + pressure * 0.18,
+          plan: "adaptive_intercept_tag",
+          horizon,
+        }));
+      }
     }
   }
   for (const template of tagControlSearchTemplates(config, target, facts)) {
@@ -1118,23 +1518,42 @@ function scoreTagJob(car, job, facts, config, personality) {
   });
   const targetFutures = opponentHypothesisPositions(target, horizon);
   const targetMids = opponentHypothesisPositions(target, horizon * 0.5);
+  const targetWeights = opponentHypothesisWeights(target);
   let finalSum = 0;
   let windowSum = 0;
   let worstWindow = 0;
   let bestWindow = Infinity;
+  let interceptSum = 0;
+  let hypothesisWeight = 0;
   for (let i = 0; i < targetFutures.length; i += 1) {
+    const weight = finite(targetWeights[i], 1);
     const final = rollout.position.distanceTo(targetFutures[i]);
     const path = segmentDistanceToPoint3D(facts.position, rollout.position, targetMids[i]);
     const window = Math.min(final, path);
-    finalSum += final;
-    windowSum += window;
+    finalSum += final * weight;
+    windowSum += window * weight;
+    interceptSum += job.point.distanceTo(targetFutures[i]) * weight;
+    hypothesisWeight += weight;
     worstWindow = Math.max(worstWindow, window);
     bestWindow = Math.min(bestWindow, window);
   }
-  const hypothesisCount = Math.max(1, targetFutures.length);
+  const hypothesisCount = Math.max(1, hypothesisWeight);
   const finalDistance = finalSum / hypothesisCount;
   const tagWindow = windowSum / hypothesisCount * 0.65 + worstWindow * 0.25 + bestWindow * 0.1;
   const tagChance = (1 - clamp01((tagWindow - TAG_RANGE) / 25)) * 265;
+  const conversionReadiness = clamp01(
+    0.22 +
+    (1 - finite(target.mobility, 1)) * 0.9 +
+    (finite(target.wheels, 4) <= 1 ? 0.34 : finite(target.wheels, 4) <= 2 ? 0.18 : 0) +
+    (target.contactDistance < TAG_RANGE + 6 ? 0.22 : 0)
+  );
+  const conversionValue =
+    target.contactDistance < TAG_RANGE + 18
+      ? (
+        (1 - clamp01((tagWindow - TAG_RANGE) / 11)) * 95 +
+        (1 - clamp01((finalDistance - TAG_RANGE) / 16)) * 52
+      ) * conversionReadiness
+      : 0;
   const progress = THREE.MathUtils.clamp(target.contactDistance - finalDistance, -28, 52) * 1.7;
   const directFinish = target.contactDistance < TAG_RANGE + 8 && job.plan === "direct_tag"
     ? (TAG_RANGE + 8 - target.contactDistance) * 40
@@ -1142,7 +1561,7 @@ function scoreTagJob(car, job, facts, config, personality) {
   const closeDirectBias = target.contactDistance < 18
     ? (job.plan === "direct_tag" || job.plan === "reverse_tag" ? 120 : job.action ? 0 : -35)
     : 0;
-  const interceptDistance = targetFutures.reduce((sum, future) => sum + job.point.distanceTo(future), 0) / hypothesisCount;
+  const interceptDistance = interceptSum / hypothesisCount;
   const predictivePlan =
     job.plan === "lead_tag" ||
     job.plan === "cutoff_tag" ||
@@ -1151,6 +1570,10 @@ function scoreTagJob(car, job, facts, config, personality) {
     job.plan === "orbit_cutoff_tag" ||
     job.plan === "deep_cutoff_tag" ||
     job.plan === "arc_pinch_tag" ||
+    job.plan === "adaptive_intercept_tag" ||
+    job.plan === "tag_feature_bypass" ||
+    job.plan === "tag_feature_cut" ||
+    job.plan === "tag_boost_lane" ||
     job.plan.startsWith?.("search_");
   const predictiveValue =
     predictivePlan && target.contactDistance > 18
@@ -1160,6 +1583,18 @@ function scoreTagJob(car, job, facts, config, personality) {
     (job.plan === "orbit_cutoff_tag" || job.plan === "deep_cutoff_tag" || job.plan === "arc_pinch_tag") && target.contactDistance > 26
       ? clamp01((horizon - 1.1) / 1.8) * clamp01(target.speed / 26) * (52 + risk * 44)
       : 0;
+  const multiAgentValue =
+    finite(config.planningSkill) > 0.9 && predictivePlan && target.contactDistance > 24 && facts.runners.length > 2
+      ? Math.min(18, tagMultiAgentOpportunity(target, job, facts, horizon) * THREE.MathUtils.lerp(0.12, 0.28, risk))
+      : 0;
+  const tagRouteValue =
+    job.plan === "tag_feature_bypass"
+      ? clamp01((target.speed + facts.speed) / 70) * 28 + clamp01((target.contactDistance - 18) / 42) * 24
+      : job.plan === "tag_feature_cut"
+        ? clamp01((target.contactDistance - TAG_RANGE - 8) / 34) * 32 + clamp01((1 - target.mobility) * 1.4) * 20
+        : job.plan === "tag_boost_lane"
+          ? clamp01((target.contactDistance - TAG_RANGE - 12) / 44) * 46 + clamp01(target.speed / 36) * 24
+          : 0;
   const actionValue =
     job.action && target.contactDistance > TAG_RANGE + 5
       ? (1 - clamp01((tagWindow - TAG_RANGE) / 28)) * (52 + risk * 34) +
@@ -1180,8 +1615,10 @@ function scoreTagJob(car, job, facts, config, personality) {
     target.verticalGap > 10 && target.contactDistance > TAG_RANGE + 12
       ? clamp01((target.verticalGap - 10) / 28) * clamp01((target.contactDistance - TAG_RANGE - 12) / 32) * 420
       : 0;
+  const tagFeatureRoute = job.plan === "tag_feature_bypass" || job.plan === "tag_feature_cut";
+  const tagBoostLane = job.plan === "tag_boost_lane";
   const routeCost =
-    featureRiskAlong(facts.position, job.point, facts) * 34 +
+    featureRiskAlong(facts.position, job.point, facts) * (tagFeatureRoute ? 12 : tagBoostLane ? 18 : 34) +
     surfaceRisk(job.point, facts, surfaceDirectionToPoint(facts.position, job.point, facts, tmpVec3D)) * 34 +
     rollout.surfaceLoad * 14 +
     rollout.turnLoad * 12;
@@ -1191,11 +1628,14 @@ function scoreTagJob(car, job, facts, config, personality) {
     tagEaseValue(target) * finite(config.aggression) * personality.chase +
     tagStrategicValue(target, facts, config, personality) +
     tagChance +
+    conversionValue +
     progress +
     directFinish +
     closeDirectBias +
     predictiveValue +
     longCutoffValue +
+    multiAgentValue +
+    tagRouteValue +
     actionValue +
     targetStickiness -
     directFollowCost -
@@ -1208,7 +1648,27 @@ function scoreTagJob(car, job, facts, config, personality) {
 function chooseTagJob(car, facts, config, personality) {
   let best = null;
   let bestScore = -Infinity;
+  const planning = clamp01(finite(config.planningSkill) / 1.35);
+  const targetLimit = planning > 0.9 ? 4 : planning > 0.72 ? 3 : 2;
+  const selectedTargets = [];
   for (const target of facts.runners) {
+    if (target.immunity <= 0 && target.contactDistance < TAG_RANGE + 14) selectedTargets.push(target);
+  }
+  while (selectedTargets.length < Math.min(targetLimit, facts.runners.length)) {
+    let bestTarget = null;
+    let bestPriority = -Infinity;
+    for (const target of facts.runners) {
+      if (target.immunity > 0 || selectedTargets.includes(target)) continue;
+      const priority = tagTargetPriority(target, facts, config, personality);
+      if (priority > bestPriority) {
+        bestPriority = priority;
+        bestTarget = target;
+      }
+    }
+    if (!bestTarget) break;
+    selectedTargets.push(bestTarget);
+  }
+  for (const target of selectedTargets) {
     if (target.immunity > 0) continue;
     for (const job of tagCandidatesForTarget(car, target, facts, config)) {
       projectArenaSurfacePoint(job.point, facts, 4);
@@ -1280,6 +1740,22 @@ function runnerCandidates(car, facts, config) {
     urgency: Math.max(0.08, facts.crowd.pressure),
     plan: "open_space",
   }));
+  if (facts.threat && facts.threatRisk > 0.2 && canBoostNow(facts, config, 0)) {
+    const boostLane = away.clone().multiplyScalar(54).addScaledVector(lateral, car.ai.lateralSign * 18);
+    const boostPoint = position.clone().add(boostLane);
+    projectArenaSurfacePoint(boostPoint, facts, 8);
+    if (featureRiskAlong(position, boostPoint, facts) < 0.42 && surfaceRisk(boostPoint, facts, surfaceDirectionToPoint(position, boostPoint, facts, tmpVec3D)) < 0.42) {
+      jobs.push(makeJob({
+        type: "run",
+        point: boostPoint,
+        threat: facts.threat,
+        desiredSpeed: 50,
+        urgency: Math.max(0.34, facts.threatRisk),
+        plan: "boost_lane_escape",
+        score: 34 + facts.threatRisk * 42,
+      }));
+    }
+  }
 
   if (facts.crowd.pressure > 0.06) {
     jobs.push(makeJob({
@@ -1291,6 +1767,7 @@ function runnerCandidates(car, facts, config) {
       plan: "uncrowd",
     }));
   }
+  jobs.push(...featureEscapeJobs(car, facts, config));
   for (const template of runnerControlSearchTemplates(car, config, facts)) {
     const first = template.sequence[0] ?? { steer: 0, throttle: 1 };
     const action = {
@@ -1325,8 +1802,10 @@ function scoreRunnerJob(car, job, facts, config, personality) {
     horizon,
     boost: canBoostNow(facts, config, 0) && facts.threatRisk > 0.25 && finite(config.boostSkill) > 0.75,
   });
+  const intentionalFeature = job.plan === "feature_cut" || job.plan === "feature_escape" || job.plan === "feature_bypass";
+  const boostLane = job.plan === "boost_lane_escape";
   const pathRisk =
-    featureRiskAlong(facts.position, job.point, facts) * 30 +
+    featureRiskAlong(facts.position, job.point, facts) * (intentionalFeature ? 8 : boostLane ? 18 : 30) +
     surfaceRisk(job.point, facts, surfaceDirectionToPoint(facts.position, job.point, facts, tmpVec3D)) * 42 +
     rollout.surfaceLoad * 22;
   const projectedRadius = Math.hypot(rollout.position.x, rollout.position.z);
@@ -1334,45 +1813,67 @@ function scoreRunnerJob(car, job, facts, config, personality) {
   const optionCost = surfaceCommitment * THREE.MathUtils.lerp(136, 34, clamp01(facts.threatRisk * 1.6)) * THREE.MathUtils.lerp(1.28, 0.78, risk);
   const crowdCost = pointCrowding(rollout.position, facts, 22) * 28 * personality.space * THREE.MathUtils.lerp(1.2, 0.88, risk);
   const trafficCost = runnerTrafficCost(car, rollout, facts, horizon) * personality.space * THREE.MathUtils.lerp(1.32, 0.86, risk);
-  const speedValue = rollout.speed * 0.4;
+  const closeThreat = facts.threat && facts.threat.contactDistance < TAG_RANGE + 16;
+  const speedValue = rollout.speed * (closeThreat ? 0.68 : 0.4);
   const turnCost = rollout.turnLoad * 10;
+  const freezeCost = closeThreat
+    ? (1 - clamp01((rollout.speed - 8) / 18)) * (58 + facts.threatRisk * 80)
+    : 0;
   let survival = 0;
 
   if (facts.threat) {
     const threatFutures = opponentHypothesisPositions(facts.threat, horizon);
     const threatMids = opponentHypothesisPositions(facts.threat, horizon * 0.5);
+    const threatWeights = opponentHypothesisWeights(facts.threat);
     let finalSum = 0;
     let pathSum = 0;
     let closestSum = 0;
     let worstClosest = Infinity;
     let tagRisk = 0;
+    let hypothesisWeight = 0;
     const threatNow = carPosition(facts.threat.car, tmpVec3C);
     for (let i = 0; i < threatFutures.length; i += 1) {
+      const weight = finite(threatWeights[i], 1);
       const final = rollout.position.distanceTo(threatFutures[i]);
       const path = segmentDistanceToPoint3D(threatNow, threatFutures[i], rollout.position);
       const crossing = segmentDistanceToPoint3D(facts.position, rollout.position, threatMids[i]);
       const closest = Math.min(final, path, crossing);
-      finalSum += final;
-      pathSum += path;
-      closestSum += closest;
+      finalSum += final * weight;
+      pathSum += path * weight;
+      closestSum += closest * weight;
+      hypothesisWeight += weight;
       worstClosest = Math.min(worstClosest, closest);
       tagRisk = Math.max(
         tagRisk,
-        1 - clamp01((final - TAG_RANGE) / 30),
-        1 - clamp01((path - TAG_RANGE) / 24),
-        1 - clamp01((crossing - TAG_RANGE) / 22),
-        1 - clamp01((closest - TAG_RANGE) / 24),
+        (1 - clamp01((final - TAG_RANGE) / 30)) * clamp01(weight),
+        (1 - clamp01((path - TAG_RANGE) / 24)) * clamp01(weight),
+        (1 - clamp01((crossing - TAG_RANGE) / 22)) * clamp01(weight),
+        (1 - clamp01((closest - TAG_RANGE) / 24)) * clamp01(weight),
       );
     }
-    const hypothesisCount = Math.max(1, threatFutures.length);
+    const hypothesisCount = Math.max(1, hypothesisWeight);
     const finalDistance = finalSum / hypothesisCount;
     const pathDistance = pathSum / hypothesisCount;
     const closestDistance = closestSum / hypothesisCount * 0.65 + worstClosest * 0.35;
+    const closeJukeValue = job.action && closeThreat
+      ? clamp01(facts.threatRisk * 2.2) * (
+        clamp01((closestDistance - TAG_RANGE) / 22) * 72 +
+        clamp01(rollout.speed / 34) * 36 +
+        (job.action.boost ? 18 : 0)
+      )
+      : 0;
+    const featureValue = intentionalFeature
+      ? clamp01(facts.threatRisk * 1.8) * (job.plan === "feature_bypass" ? 12 + clamp01(rollout.speed / 42) * 24 : 20 + clamp01(rollout.speed / 38) * 22)
+      : 0;
+    const boostLaneValue = boostLane
+      ? clamp01(facts.threatRisk * 1.8) * (24 + clamp01(rollout.speed / 48) * 26)
+      : 0;
     const searchValue = job.action
       ? closestDistance * THREE.MathUtils.lerp(0.28, 0.94, clamp01(facts.threatRisk * 1.8)) +
-        clamp01((finite(rollout.exitAlignment) + 0.2) / 1.2) * 12
+        clamp01((finite(rollout.exitAlignment) + 0.2) / 1.2) * 12 +
+        closeJukeValue
       : 0;
-    survival = finalDistance * 1.25 + pathDistance * 0.8 + searchValue - tagRisk * 170 * personality.survive * THREE.MathUtils.lerp(1.24, 0.9, risk);
+    survival = finalDistance * 1.25 + pathDistance * 0.8 + searchValue + featureValue + boostLaneValue - tagRisk * 170 * personality.survive * THREE.MathUtils.lerp(1.24, 0.9, risk);
   } else {
     survival = Math.hypot(rollout.position.x, rollout.position.z) < arenaLimit(12) ? 18 : 0;
   }
@@ -1380,7 +1881,7 @@ function scoreRunnerJob(car, job, facts, config, personality) {
   const rankComfort = facts.threatRisk < 0.18 && facts.timeRemaining > 18
     ? (facts.selfRank <= 2 ? 8 : 0)
     : 0;
-  return survival + speedValue + rankComfort - pathRisk - optionCost - crowdCost - trafficCost - turnCost;
+  return survival + speedValue + rankComfort - pathRisk - optionCost - crowdCost - trafficCost - turnCost - freezeCost;
 }
 
 function shouldDodgeThreat(car, facts, config) {
@@ -1408,9 +1909,10 @@ function shouldDodgeThreat(car, facts, config) {
 function chooseRunnerJob(car, facts, config, personality) {
   let best = null;
   let bestScore = -Infinity;
+  const dodgeThreat = shouldDodgeThreat(car, facts, config);
   for (const job of runnerCandidates(car, facts, config)) {
     projectArenaSurfacePoint(job.point, facts, 4);
-    if (shouldDodgeThreat(car, facts, config) && (job.plan.startsWith("escape") || job.plan.startsWith("evade"))) job.score += 70;
+    if (dodgeThreat && (job.plan.startsWith("escape") || job.plan.startsWith("evade"))) job.score += 70;
     const score = job.score + scoreRunnerJob(car, job, facts, config, personality);
     job.score = score;
     job.rolloutScore = score;
@@ -1486,6 +1988,10 @@ function hasImmediateTagOpportunity(facts) {
 
 function hasContactTagOpportunity(facts) {
   return facts.runners.some((target) => target.immunity <= 0 && target.contactDistance < TAG_RANGE + 1.5);
+}
+
+function hasFinishTagOpportunity(facts) {
+  return facts.runners.some((target) => target.immunity <= 0 && target.contactDistance < TAG_RANGE + 5);
 }
 
 function localDirectionToPoint(car, point, fallback, normal = WORLD_UP) {
@@ -1917,6 +2423,7 @@ function updateAiCarImpl(car, dt, {
 
   ai.perceptionClock += safeDt;
   ai.perceptionSampleClock += safeDt;
+  ai.memorySampleClock += safeDt;
   if (!ai.perceptionHistory.length || ai.perceptionSampleClock >= 0.05) {
     rememberPerception(ai, gameState, ai.perceptionClock);
     ai.perceptionSampleClock = 0;
@@ -1946,7 +2453,11 @@ function updateAiCarImpl(car, dt, {
   }
 
   const observedState = perceivedGameState(car, gameState, ai, config);
-  const facts = observe(car, observedState, config, rng, arenaId, arenaContactForPoint);
+  if (ai.memorySampleClock >= 0.08) {
+    updateOpponentMemory(car, ai, observedState, ai.memorySampleClock, arenaContactForPoint);
+    ai.memorySampleClock = 0;
+  }
+  const facts = observe(car, observedState, config, rng, arenaId, arenaContactForPoint, ai);
   updateMotionAwareness(car, ai, facts, safeDt);
 
   let canRight = false;
@@ -1967,7 +2478,7 @@ function updateAiCarImpl(car, dt, {
     ai.intent?.action &&
     finite(ai.intentElapsed) < actionSequenceDuration(ai.intent.action) - 0.001;
   const urgentTag = role === "tagger" && (
-    activeActionRemaining ? hasContactTagOpportunity(facts) : hasImmediateTagOpportunity(facts)
+    activeActionRemaining ? hasFinishTagOpportunity(facts) : hasImmediateTagOpportunity(facts)
   );
   const mustThink =
     (ai.decisionTimer <= 0 && !activeActionRemaining) ||
