@@ -201,7 +201,8 @@ function forwardOnPlane(car, normal, out = new THREE.Vector3()) {
   if (out.lengthSq() > EPS) return out.normalize();
   out.set(1, 0, 0).applyQuaternion(carQuaternion(car));
   out.addScaledVector(normal, -out.dot(normal));
-  return safeNormalize(out, flatForward(car, out));
+  if (out.lengthSq() > EPS) return out.normalize();
+  return flatForward(car, out);
 }
 
 function carUp(car, out = new THREE.Vector3()) {
@@ -361,6 +362,7 @@ function relativeCar(self, other, ranks, config, rng, arenaContactForPoint) {
     worldUpDot: carUp(other, tmpVec3D).dot(WORLD_UP),
     surfaceNormal: otherContact.normal,
     surfaceDistance: otherContact.distance,
+    surfaceResolver: arenaContactForPoint,
     wheels: finite(other.vehicle?.numWheelsOnGround),
     immunity: Math.max(0, finite(other.immunityRemaining)),
   };
@@ -530,14 +532,17 @@ function targetForward(entry, out = new THREE.Vector3()) {
   return flatForward(entry.car, out);
 }
 
-function inwardDirection(point, out = new THREE.Vector3()) {
+function inwardDirection(point, out = new THREE.Vector3(), normal = WORLD_UP) {
   out.set(-point.x, 0, -point.z);
-  return safeNormalize(out, new THREE.Vector3(0, 0, 1));
+  return projectOntoPlane(out, normal, tmpVec3C.set(0, 0, 1));
 }
 
-function perpendicular(direction, sign, out = new THREE.Vector3()) {
-  out.set(-direction.z * sign, 0, direction.x * sign);
-  return safeNormalize(out, new THREE.Vector3(sign, 0, 0));
+function perpendicular(direction, sign, out = new THREE.Vector3(), normal = WORLD_UP) {
+  out.crossVectors(direction, normal).multiplyScalar(sign);
+  if (out.lengthSq() > EPS) return out.normalize();
+  out.crossVectors(tmpVec3C.set(0, 0, 1), normal).multiplyScalar(sign);
+  if (out.lengthSq() > EPS) return out.normalize();
+  return out.set(sign, 0, 0);
 }
 
 function segmentDistanceToPoint(start, end, point) {
@@ -652,6 +657,33 @@ function uphillClimbLoad(point, facts, direction, speed) {
   return clamp01(clamp01((radial - 0.04) / 0.7) * slope * (0.7 + speedLoad * 0.8));
 }
 
+function surfaceDirectionToPoint(from, to, facts, out = new THREE.Vector3()) {
+  return tangentDirection(from, to, facts.surfaceNormal, facts.forward, out);
+}
+
+function boostClimbLoadForSteer(facts, steer, out = tmpVec3D) {
+  out.copy(facts.forward).applyAxisAngle(facts.surfaceNormal, THREE.MathUtils.clamp(steer, -1, 1) * 0.48);
+  projectOntoPlane(out, facts.surfaceNormal, facts.forward);
+  return uphillClimbLoad(facts.position, facts, out, facts.speed);
+}
+
+function canJumpNow(facts) {
+  return Boolean(facts.jumpReady && facts.wheels >= 3 && facts.surfaceUpDot > 0.72);
+}
+
+function canBoostNow(facts, config, steer = 0) {
+  return Boolean(
+    facts.boostReady &&
+    facts.wheels >= 3 &&
+    finite(config?.boostSkill, 1) > 0.72 &&
+    boostClimbLoadForSteer(facts, steer) < 0.22
+  );
+}
+
+function canBoostSegmentNow(facts, config, segment) {
+  return Boolean(segment?.boost && canBoostNow(facts, config, finite(segment.steer)));
+}
+
 function rolloutDrive(facts, point, config, {
   desiredSpeed = 38,
   horizon = 1,
@@ -672,11 +704,15 @@ function rolloutDrive(facts, point, config, {
   const brake = 38;
 
   for (let i = 0; i < steps; i += 1) {
-    const desired = target.clone().sub(position);
-    safeNormalize(desired, forward);
-    const angle = Math.acos(THREE.MathUtils.clamp(forward.dot(desired), -1, 1));
-    turnLoad = Math.max(turnLoad, clamp01(angle / 1.35));
-    forward.lerp(desired, clamp01(turnRate * stepTime / Math.max(0.001, angle))).normalize();
+    const surfaceContact = surfaceContactAt(position, facts, tmpVec3D);
+    const surfaceNormal = surfaceContact.normal;
+    projectOntoPlane(forward, surfaceNormal, facts.forward);
+    const desired = tangentDirection(position, target, surfaceNormal, forward, tmpVec3B);
+    const signedAngle = Math.atan2(tmpVec3C.copy(forward).cross(desired).dot(surfaceNormal), THREE.MathUtils.clamp(forward.dot(desired), -1, 1));
+    const yaw = THREE.MathUtils.clamp(signedAngle, -turnRate * stepTime, turnRate * stepTime);
+    turnLoad = Math.max(turnLoad, clamp01(Math.abs(signedAngle) / 1.35));
+    forward.applyAxisAngle(surfaceNormal, yaw);
+    projectOntoPlane(forward, surfaceNormal, facts.forward);
     const risk = surfaceRisk(position, facts, forward);
     const climbLoad = uphillClimbLoad(position, facts, forward, speed);
     surfaceLoad = Math.max(surfaceLoad, risk, climbLoad);
@@ -686,7 +722,7 @@ function rolloutDrive(facts, point, config, {
       ? Math.min(error, accel * stepTime)
       : Math.max(error, -brake * stepTime);
     speed -= climbLoad * (8 + Math.max(0, speed) * 0.28) * stepTime;
-    speed *= THREE.MathUtils.lerp(1, 0.9, clamp01((angle - 0.7) / 1.4) * clamp01(speed / 42));
+    speed *= THREE.MathUtils.lerp(1, 0.9, clamp01((Math.abs(signedAngle) - 0.7) / 1.4) * clamp01(speed / 42));
     speed = Math.max(0, speed);
     position.addScaledVector(forward, speed * stepTime);
     projectArenaSurfacePoint(position, facts, 4);
@@ -843,14 +879,32 @@ function predictOrbitPosition(position, velocity, seconds, out = new THREE.Vecto
 function predictOpponentHypothesis(entry, seconds, kind, out = new THREE.Vector3()) {
   const pos = carPosition(entry.car, out);
   const velocity = carVelocity(entry.car, new THREE.Vector3());
-  const normal = entry.surfaceNormal?.isVector3 ? entry.surfaceNormal : WORLD_UP;
-  if (kind === "turn_left" || kind === "turn_right") {
-    const sign = kind === "turn_left" ? 1 : -1;
-    velocity.applyAxisAngle(normal, sign * 1.15 * seconds);
-  } else if (kind === "brake_reverse") {
-    velocity.multiplyScalar(THREE.MathUtils.lerp(1, -0.28, clamp01(seconds / 0.9)));
+  const resolver = entry.surfaceResolver;
+  let normal = entry.surfaceNormal?.isVector3 ? entry.surfaceNormal : WORLD_UP;
+  const steps = Math.max(2, Math.min(6, Math.ceil(seconds * 3)));
+  const dt = seconds / steps;
+  const initialSpeed = velocity.length();
+  const turnSign = kind === "turn_left" ? 1 : kind === "turn_right" ? -1 : 0;
+
+  for (let i = 0; i < steps; i += 1) {
+    const contact = surfaceContactForPosition(pos, resolver, tmpVec3D);
+    normal = contact.normal;
+    velocity.addScaledVector(normal, -velocity.dot(normal));
+    if (turnSign) velocity.applyAxisAngle(normal, turnSign * 1.15 * dt);
+    else if (kind === "brake_reverse") {
+      const currentSpeed = velocity.length();
+      const targetSpeed = -initialSpeed * 0.28;
+      const nextSpeed = THREE.MathUtils.lerp(currentSpeed, targetSpeed, clamp01(dt / 0.9));
+      if (currentSpeed > EPS) velocity.multiplyScalar(nextSpeed / currentSpeed);
+    }
+    pos.addScaledVector(velocity, dt);
+    clampArenaPoint(pos, 4);
+    const projected = surfaceContactForPosition(pos, resolver, tmpVec3D);
+    if (Math.abs(projected.distance) < 3) {
+      pos.y = finite(projected.point?.y, arenaSurfaceYAt(pos));
+    }
   }
-  return pos.addScaledVector(velocity, seconds);
+  return pos;
 }
 
 function opponentHypothesisPositions(entry, seconds) {
@@ -867,7 +921,7 @@ function tagControlSearchTemplates(config, target, facts) {
   const turnIn = side;
   const turnOut = -side;
   const close = target.contactDistance < 20;
-  const canBoost = facts.boostReady && finite(config.boostSkill) > 0.72 && finite(facts.wheels, 4) >= 3;
+  const canBoost = (steer = baseSteer) => canBoostNow(facts, config, steer);
   const templates = [
     { label: "search_commit", horizon: 0.44, sequence: [{ duration: 0.44, steer: baseSteer, throttle: 1 }] },
     { label: "search_turn_in", horizon: 0.52, sequence: [{ duration: 0.52, steer: turnIn, throttle: close ? 0.68 : 0.84 }] },
@@ -877,19 +931,21 @@ function tagControlSearchTemplates(config, target, facts) {
     templates.push(
       { label: "search_brake_in", horizon: 0.68, sequence: [{ duration: 0.2, steer: turnIn, throttle: -0.32 }, { duration: 0.48, steer: turnIn * 0.86, throttle: 1 }] },
       { label: "search_hook_in", horizon: 0.76, sequence: [{ duration: 0.28, steer: turnIn, throttle: 0.42 }, { duration: 0.48, steer: baseSteer * 0.65, throttle: 1 }] },
-      ...(canBoost ? [{ label: "search_boost_commit", horizon: 0.62, sequence: [{ duration: 0.62, steer: baseSteer * 0.7, throttle: 1, boost: true }] }] : []),
+      ...(canBoost(baseSteer * 0.7) ? [{ label: "search_boost_commit", horizon: 0.62, sequence: [{ duration: 0.62, steer: baseSteer * 0.7, throttle: 1, boost: true }] }] : []),
     );
   }
   if (planning >= 0.92) {
     templates.push(
       { label: "search_pivot_in", horizon: 0.86, sequence: [{ duration: 0.26, steer: turnIn, throttle: -0.64 }, { duration: 0.6, steer: turnIn * 0.72, throttle: 1 }] },
       { label: "search_pivot_out", horizon: 0.8, sequence: [{ duration: 0.22, steer: turnOut, throttle: -0.58 }, { duration: 0.58, steer: baseSteer, throttle: 1 }] },
-      ...(canBoost ? [
+      ...(canBoost(THREE.MathUtils.clamp(baseSteer + side * 0.42, -1, 1)) ? [
         { label: "search_boost_cut_in", horizon: 0.9, sequence: [{ duration: 0.32, steer: THREE.MathUtils.clamp(baseSteer + side * 0.42, -1, 1), throttle: 1, boost: true }, { duration: 0.58, steer: baseSteer * 0.62, throttle: 1 }] },
+      ] : []),
+      ...(canBoost(THREE.MathUtils.clamp(baseSteer - side * 0.5, -1, 1)) ? [
         { label: "search_boost_cut_out", horizon: 0.84, sequence: [{ duration: 0.28, steer: THREE.MathUtils.clamp(baseSteer - side * 0.5, -1, 1), throttle: 1, boost: true }, { duration: 0.56, steer: baseSteer, throttle: 1 }] },
       ] : []),
     );
-    if (facts.jumpReady && target.contactDistance < TAG_RANGE + 12 && (finite(target.wheels, 4) <= 1 || finite(target.verticalGap) > 2.2)) {
+    if (canJumpNow(facts) && target.contactDistance < TAG_RANGE + 12 && (finite(target.wheels, 4) <= 1 || finite(target.verticalGap) > 2.2)) {
       templates.push({ label: "search_jump_contest", horizon: 0.56, sequence: [{ duration: 0.56, steer: baseSteer, throttle: 1, jump: true }] });
     }
   }
@@ -906,7 +962,7 @@ function runnerControlSearchTemplates(car, config, facts) {
   threatLocal.applyQuaternion(carQuaternion(car).invert());
   const steerAway = THREE.MathUtils.clamp(-Math.atan2(threatLocal.x, threatLocal.z) / 0.95, -1, 1);
   const side = Math.sign(steerAway) || 1;
-  const canBoost = facts.boostReady && finite(config.boostSkill) > 0.72 && facts.wheels >= 3;
+  const canBoost = (steer = steerAway) => canBoostNow(facts, config, steer);
   const elevatedThreat = facts.threat.verticalGap > 1.5 || finite(facts.threat.wheels, 4) <= 1;
   const templates = [
     { label: "evade_commit", horizon: 0.56, sequence: [{ duration: 0.56, steer: steerAway, throttle: 1 }] },
@@ -916,13 +972,13 @@ function runnerControlSearchTemplates(car, config, facts) {
   if (planning >= 0.72) {
     templates.push(
       { label: "evade_brake_juke", horizon: 0.72, sequence: [{ duration: 0.18, steer: -side, throttle: -0.35 }, { duration: 0.54, steer: side, throttle: 1 }] },
-      ...(canBoost && facts.threatRisk > 0.18 ? [{ label: "evade_boost_escape", horizon: 0.7, sequence: [{ duration: 0.7, steer: steerAway * 0.74, throttle: 1, boost: true }] }] : []),
+      ...(canBoost(steerAway * 0.74) && facts.threatRisk > 0.18 ? [{ label: "evade_boost_escape", horizon: 0.7, sequence: [{ duration: 0.7, steer: steerAway * 0.74, throttle: 1, boost: true }] }] : []),
     );
   }
   if (planning >= 0.92) {
     templates.push(
       { label: "evade_pivot", horizon: 0.82, sequence: [{ duration: 0.22, steer: -side, throttle: -0.55 }, { duration: 0.6, steer: side, throttle: 1 }] },
-      ...(facts.jumpReady && facts.threat.contactDistance < TAG_RANGE + 9 && facts.threatRisk > 0.32 && !elevatedThreat
+      ...(canJumpNow(facts) && facts.threat.contactDistance < TAG_RANGE + 9 && facts.threatRisk > 0.32 && !elevatedThreat
         ? [{ label: "evade_jump_over", horizon: 0.58, sequence: [{ duration: 0.58, steer: steerAway * 0.5, throttle: 1, jump: true }] }]
         : []),
     );
@@ -942,9 +998,9 @@ function tagCandidatesForTarget(car, target, facts, config) {
   const leadTime = THREE.MathUtils.clamp(target.contactDistance / Math.max(18, facts.speed + speed * 0.7), 0.12, THREE.MathUtils.lerp(1.05, 1.55, planning));
   const future = pos.clone().addScaledVector(velocity, leadTime);
   projectArenaSurfacePoint(future, facts, 4);
-  const inward = inwardDirection(future, new THREE.Vector3());
+  const inward = inwardDirection(future, new THREE.Vector3(), facts.surfaceNormal);
   const side = Math.sign(future.clone().sub(facts.position).cross(forward).dot(facts.surfaceNormal)) || car.ai.lateralSign || 1;
-  const lateral = perpendicular(forward, side, new THREE.Vector3());
+  const lateral = perpendicular(forward, side, new THREE.Vector3(), facts.surfaceNormal);
   const actualLocal = tangentDirection(facts.position, pos, facts.surfaceNormal, facts.forward, new THREE.Vector3());
   actualLocal.applyQuaternion(carQuaternion(car).invert());
   const behind = actualLocal.z < -0.1 && target.contactDistance < 24;
@@ -999,10 +1055,10 @@ function tagCandidatesForTarget(car, target, facts, config) {
       const orbitFuture = predictOrbitPosition(pos, velocity, horizon, new THREE.Vector3());
       projectArenaSurfacePoint(orbitFuture, facts, 4);
       const orbitForward = targetForward(target, new THREE.Vector3());
-      const orbitInward = inwardDirection(orbitFuture, new THREE.Vector3());
+      const orbitInward = inwardDirection(orbitFuture, new THREE.Vector3(), facts.surfaceNormal);
       const toFuture = tangentDirection(facts.position, orbitFuture, facts.surfaceNormal, facts.forward, new THREE.Vector3());
       const orbitSide = Math.sign(toFuture.cross(orbitForward).dot(facts.surfaceNormal)) || side;
-      const orbitLateral = perpendicular(orbitForward, orbitSide, new THREE.Vector3());
+      const orbitLateral = perpendicular(orbitForward, orbitSide, new THREE.Vector3(), facts.surfaceNormal);
       jobs.push(makeJob({
         type: "tag",
         point: orbitFuture.clone().addScaledVector(orbitInward, 20 + index * 8).addScaledVector(orbitForward, 8 + index * 7),
@@ -1058,7 +1114,7 @@ function scoreTagJob(car, job, facts, config, personality) {
   const rollout = job.rollout ?? rolloutDrive(facts, job.point, config, {
     desiredSpeed: job.desiredSpeed,
     horizon,
-    boost: facts.boostReady && finite(config.boostSkill) > 1.05 && target.contactDistance > TAG_RANGE + 8,
+    boost: canBoostNow(facts, config, 0) && finite(config.boostSkill) > 1.05 && target.contactDistance > TAG_RANGE + 8,
   });
   const targetFutures = opponentHypothesisPositions(target, horizon);
   const targetMids = opponentHypothesisPositions(target, horizon * 0.5);
@@ -1116,9 +1172,17 @@ function scoreTagJob(car, job, facts, config, personality) {
     job.plan === "direct_tag" && target.contactDistance > 26 && target.speed > 10
       ? clamp01((target.contactDistance - 26) / 36) * clamp01(target.speed / 32) * 70
       : 0;
+  const detachedTargetCost =
+    Math.abs(finite(target.surfaceDistance)) > 8 && target.contactDistance > TAG_RANGE + 12
+      ? clamp01((Math.abs(finite(target.surfaceDistance)) - 8) / 28) * clamp01((target.contactDistance - TAG_RANGE - 12) / 32) * 320
+      : 0;
+  const verticalReachCost =
+    target.verticalGap > 10 && target.contactDistance > TAG_RANGE + 12
+      ? clamp01((target.verticalGap - 10) / 28) * clamp01((target.contactDistance - TAG_RANGE - 12) / 32) * 420
+      : 0;
   const routeCost =
     featureRiskAlong(facts.position, job.point, facts) * 34 +
-    surfaceRisk(job.point, facts, job.point.clone().sub(facts.position).setY(0).normalize()) * 34 +
+    surfaceRisk(job.point, facts, surfaceDirectionToPoint(facts.position, job.point, facts, tmpVec3D)) * 34 +
     rollout.surfaceLoad * 14 +
     rollout.turnLoad * 12;
   const riskAdjustedRouteCost = routeCost * THREE.MathUtils.lerp(1.22, 0.82, risk);
@@ -1135,6 +1199,8 @@ function scoreTagJob(car, job, facts, config, personality) {
     actionValue +
     targetStickiness -
     directFollowCost -
+    detachedTargetCost -
+    verticalReachCost -
     riskAdjustedRouteCost
   );
 }
@@ -1169,9 +1235,9 @@ function runnerCandidates(car, facts, config) {
   const threatPos = facts.threat ? carPosition(facts.threat.car, new THREE.Vector3()) : null;
   const away = threatPos ? position.clone().sub(threatPos) : facts.forward.clone();
   projectOntoPlane(away, facts.surfaceNormal, facts.forward);
-  const inward = inwardDirection(position, new THREE.Vector3());
-  const lateral = perpendicular(away, car.ai.lateralSign || 1, new THREE.Vector3());
-  const tangent = perpendicular(inward, car.ai.lateralSign || 1, new THREE.Vector3());
+  const inward = inwardDirection(position, new THREE.Vector3(), facts.surfaceNormal);
+  const lateral = perpendicular(away, car.ai.lateralSign || 1, new THREE.Vector3(), facts.surfaceNormal);
+  const tangent = perpendicular(inward, car.ai.lateralSign || 1, new THREE.Vector3(), facts.surfaceNormal);
   const boundary = clamp01((Math.hypot(position.x, position.z) - curveStartRadius()) / 34);
 
   jobs.push(makeJob({
@@ -1257,11 +1323,11 @@ function scoreRunnerJob(car, job, facts, config, personality) {
   const rollout = job.rollout ?? rolloutDrive(facts, job.point, config, {
     desiredSpeed: job.desiredSpeed,
     horizon,
-    boost: facts.boostReady && facts.threatRisk > 0.25 && finite(config.boostSkill) > 0.75,
+    boost: canBoostNow(facts, config, 0) && facts.threatRisk > 0.25 && finite(config.boostSkill) > 0.75,
   });
   const pathRisk =
     featureRiskAlong(facts.position, job.point, facts) * 30 +
-    surfaceRisk(job.point, facts, job.point.clone().sub(facts.position).setY(0).normalize()) * 42 +
+    surfaceRisk(job.point, facts, surfaceDirectionToPoint(facts.position, job.point, facts, tmpVec3D)) * 42 +
     rollout.surfaceLoad * 22;
   const projectedRadius = Math.hypot(rollout.position.x, rollout.position.z);
   const surfaceCommitment = clamp01((projectedRadius - (finite(worldSpec?.floorRadius, 68) - 2)) / 30);
@@ -1418,6 +1484,10 @@ function hasImmediateTagOpportunity(facts) {
   return facts.runners.some((target) => target.immunity <= 0 && target.contactDistance < TAG_RANGE + 8);
 }
 
+function hasContactTagOpportunity(facts) {
+  return facts.runners.some((target) => target.immunity <= 0 && target.contactDistance < TAG_RANGE + 1.5);
+}
+
 function localDirectionToPoint(car, point, fallback, normal = WORLD_UP) {
   const direction = tangentDirection(carPosition(car, tmpVec3B), point, normal, fallback, tmpVec3A);
   return direction.applyQuaternion(carQuaternion(car).invert());
@@ -1443,7 +1513,8 @@ function speedThrottle(base, desiredSpeed, steer, facts) {
 
 function tractionLimitedThrottle(throttle, steer, facts) {
   if (throttle <= 0) return throttle;
-  const driveDirection = tmpVec3D.copy(facts.forward).applyAxisAngle(WORLD_UP, THREE.MathUtils.clamp(steer, -1, 1) * 0.48);
+  const driveDirection = tmpVec3D.copy(facts.forward).applyAxisAngle(facts.surfaceNormal, THREE.MathUtils.clamp(steer, -1, 1) * 0.48);
+  projectOntoPlane(driveDirection, facts.surfaceNormal, facts.forward);
   const climbLoad = uphillClimbLoad(facts.position, facts, driveDirection, facts.speed);
   return throttle * THREE.MathUtils.lerp(1, 0.55, climbLoad);
 }
@@ -1555,9 +1626,8 @@ function applyActionJobControl(car, job, facts) {
     throttle *= THREE.MathUtils.lerp(0.42, 0.68, clamp01((32 - facts.speed) / 8));
   }
   car.input.throttle = THREE.MathUtils.clamp(throttle, -1, 1);
-  const climbLoad = uphillClimbLoad(facts.position, facts, tmpVec3D.copy(facts.forward).applyAxisAngle(WORLD_UP, car.input.steer * 0.48), facts.speed);
-  car.input.boostQueued = Boolean(segment.boost) && finite(car.boostCooldownRemaining) <= 0 && facts.wheels >= 3 && climbLoad < 0.22;
-  if (segment.jump && facts.wheels >= 3 && facts.surfaceUpDot > 0.72 && car.ai.jumpCooldown <= 0) {
+  car.input.boostQueued = canBoostSegmentNow(facts, null, segment);
+  if (segment.jump && canJumpNow(facts)) {
     car.input.jumpQueued = true;
     car.ai.jumpCooldown = 0.9;
   }
@@ -1605,13 +1675,11 @@ function driveToJob(car, job, facts, config, personality, rng) {
 
   if (applyCloseTagControl(car, job, facts)) return;
 
-  const boostReady = finite(car.boostCooldownRemaining) <= 0;
   const alignment = alignmentToPoint(car, job.point, facts.surfaceNormal);
   const climbRisk = surfaceRisk(facts.position, facts, facts.forward);
   const risk = riskAppetite(config, personality);
   const canBoost =
-    boostReady &&
-    facts.wheels >= 3 &&
+    canBoostNow(facts, config, steer) &&
     facts.surfaceUpDot > 0.84 &&
     climbRisk < THREE.MathUtils.lerp(0.08, 0.2, risk) &&
     alignment > THREE.MathUtils.lerp(0.78, 0.46, clamp01(finite(config.boostSkill) / 1.4) * THREE.MathUtils.lerp(0.72, 1.08, risk)) &&
@@ -1891,7 +1959,6 @@ function updateAiCarImpl(car, dt, {
   }
 
   const role = car.isIt ? "tagger" : "runner";
-  const urgentTag = role === "tagger" && hasImmediateTagOpportunity(facts);
   const recoveryNeeded = shouldRecover(facts);
   const unstickNeeded = shouldUnstick(facts, ai.stuckTimer);
   const intentValid = ai.intentRole === role && intentTargetValid(ai.intent, facts, role);
@@ -1899,6 +1966,9 @@ function updateAiCarImpl(car, dt, {
     intentValid &&
     ai.intent?.action &&
     finite(ai.intentElapsed) < actionSequenceDuration(ai.intent.action) - 0.001;
+  const urgentTag = role === "tagger" && (
+    activeActionRemaining ? hasContactTagOpportunity(facts) : hasImmediateTagOpportunity(facts)
+  );
   const mustThink =
     (ai.decisionTimer <= 0 && !activeActionRemaining) ||
     !ai.intent ||
