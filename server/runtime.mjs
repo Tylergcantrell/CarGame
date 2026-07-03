@@ -379,6 +379,7 @@ function publicRound(round, selfSessionId = null) {
   if (!round) return null;
   return {
     id: round.id,
+    seed: round.seed,
     startedAt: round.startedAt,
     playStartsAt: round.playStartsAt,
     endsAt: round.endsAt,
@@ -538,38 +539,44 @@ function broadcastState(room) {
   broadcast(room, (selfId) => publicState(room, selfId));
 }
 
-function publicSnapshotForClient(snapshot, client) {
-  if (!snapshot || !client) return snapshot;
-  return {
-    ...snapshot,
-    cars: snapshot.cars.map((car) => {
-      const isSelf = car.sessionId === client.sessionId;
-      return {
-        key: car.key,
-        position: car.position,
-        quaternion: car.quaternion,
-        velocity: car.velocity,
-        angularVelocity: car.angularVelocity,
-        score: car.score,
-        isIt: car.isIt,
-        immunityRemaining: car.immunityRemaining,
-        boostTimeRemaining: car.boostTimeRemaining,
-        boostCooldownRemaining: car.boostCooldownRemaining,
-        manualRightingActive: car.manualRightingActive,
-        manualRightingElapsed: car.manualRightingElapsed,
-        manualRightingStartPosition: car.manualRightingStartPosition,
-        manualRightingTargetPosition: car.manualRightingTargetPosition,
-        manualRightingStartQuaternion: car.manualRightingStartQuaternion,
-        manualRightingTargetQuaternion: car.manualRightingTargetQuaternion,
-        input: car.input,
-        ...(isSelf ? {
-          sessionId: car.sessionId,
-          inputSequence: car.inputSequence,
-          inputTick: car.inputTick,
-        } : {}),
-      };
-    }),
-  };
+const compactPositionScale = 100;
+const compactQuaternionScale = 32767;
+const compactVelocityScale = 100;
+const compactAngularVelocityScale = 1000;
+const compactInputScale = 1000;
+
+function quantize(value, scale) {
+  return Math.round((Number(value) || 0) * scale);
+}
+
+function quantizeVec3(values, scale) {
+  return [
+    quantize(values?.[0], scale),
+    quantize(values?.[1], scale),
+    quantize(values?.[2], scale),
+  ];
+}
+
+function quantizeQuat(values) {
+  return [
+    quantize(values?.[0], compactQuaternionScale),
+    quantize(values?.[1], compactQuaternionScale),
+    quantize(values?.[2], compactQuaternionScale),
+    quantize(values?.[3] ?? 1, compactQuaternionScale),
+  ];
+}
+
+function quantizeSecondsMs(value) {
+  return Math.max(0, Math.round((Number(value) || 0) * 1000));
+}
+
+function packInput(input = {}) {
+  return [
+    quantize(input.throttle, compactInputScale),
+    quantize(input.steer, compactInputScale),
+    (input.boost ? 1 : 0) | (input.boostQueued ? 2 : 0) | (input.jumpQueued ? 4 : 0),
+    quantize(input.airRoll, compactInputScale),
+  ];
 }
 
 function compactSnapshotForClient(snapshot, client) {
@@ -579,34 +586,40 @@ function compactSnapshotForClient(snapshot, client) {
     roomCode: snapshot.roomCode,
     roundId: snapshot.roundId,
     serverTime: snapshot.serverTime,
+    sampleTime: snapshot.sampleTime ?? snapshot.serverTime,
     simTick: snapshot.simTick,
     simLastTick: snapshot.simLastTick,
     simAccumulator: snapshot.simAccumulator,
     remainingMs: snapshot.remainingMs,
-    compact: 1,
+    compact: 2,
     cars: snapshot.cars.map((car) => {
+      const isSelf = car.sessionId === client.sessionId;
+      const flags = (car.isIt ? 1 : 0) | (car.manualRightingActive ? 2 : 0);
       const entry = [
         car.key,
-        car.position,
-        car.quaternion,
-        car.velocity,
-        car.angularVelocity,
-        car.score,
-        car.isIt ? 1 : 0,
-        car.immunityRemaining,
-        car.boostTimeRemaining,
-        car.boostCooldownRemaining,
-        car.input,
-        car.sessionId === client.sessionId ? car.inputSequence : 0,
-        car.sessionId === client.sessionId ? car.sessionId : null,
-        car.sessionId === client.sessionId ? car.inputTick : 0,
-        car.manualRightingActive ? 1 : 0,
-        car.manualRightingElapsed,
-        car.manualRightingStartPosition,
-        car.manualRightingTargetPosition,
-        car.manualRightingStartQuaternion,
-        car.manualRightingTargetQuaternion,
+        quantizeVec3(car.position, compactPositionScale),
+        quantizeQuat(car.quaternion),
+        quantizeVec3(car.velocity, compactVelocityScale),
+        quantizeVec3(car.angularVelocity, compactAngularVelocityScale),
+        quantizeSecondsMs(car.score),
+        flags,
+        quantizeSecondsMs(car.immunityRemaining),
+        quantizeSecondsMs(car.boostTimeRemaining),
+        quantizeSecondsMs(car.boostCooldownRemaining),
+        packInput(car.input),
+        isSelf ? car.inputSequence : 0,
+        isSelf ? car.sessionId : null,
+        isSelf ? car.inputTick : 0,
       ];
+      if (car.manualRightingActive) {
+        entry.push(
+          quantizeSecondsMs(car.manualRightingElapsed),
+          quantizeVec3(car.manualRightingStartPosition, compactPositionScale),
+          quantizeVec3(car.manualRightingTargetPosition, compactPositionScale),
+          quantizeQuat(car.manualRightingStartQuaternion),
+          quantizeQuat(car.manualRightingTargetQuaternion),
+        );
+      }
       return entry;
     }),
   };
@@ -785,7 +798,7 @@ function endRound(room, reason = "timer") {
       roomCode: room.code,
       roundId: endedRound.id,
       reason,
-      snapshot: publicSnapshotForClient(finalSnapshot, client),
+      snapshot: compactSnapshotForClient(finalSnapshot, client),
       results: publicResultsForClient(finalResults, client),
     };
   });
@@ -812,6 +825,7 @@ function startRound(room, client) {
   const playStartsAt = startedAt + config.countdownMs;
   room.activeRound = {
     id: randomUUID(),
+    seed: randomUUID(),
     startedAt,
     playStartsAt,
     endsAt: playStartsAt + roundSettings.roundTime * 1000,

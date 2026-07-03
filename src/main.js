@@ -165,22 +165,35 @@ const maxPredictionInputHistory = 180;
 const maxPredictionReplayCatchupMs = 250;
 const maxPredictionReplayCatchupTicks = 23;
 const maxSeenReliableEvents = 256;
-const remoteInterpolationBaseDelayMs = 30;
-const remoteInterpolationMinDelayMs = 20;
-const remoteInterpolationMaxDelayMs = 85;
-const remoteInterpolationMaxExtrapolateMs = 220;
-const remoteSnapshotBufferLimit = 16;
+const remoteInterpolationBaseDelayMs = 112;
+const remoteInterpolationMinDelayMs = 88;
+const remoteInterpolationMaxDelayMs = 235;
+const remoteInterpolationMaxExtrapolateMs = 230;
+const remoteSnapshotBufferLimit = 24;
 const remoteSnapDistanceSq = 900;
+const remoteMicroSnapDistanceSq = 0.0004;
+const remoteMaxHermiteOvershootMeters = 1.8;
+const remoteMaxExtrapolatedLeadMeters = 2.75;
+const remoteSoftExtrapolatedLeadMeters = 1.1;
+const remoteSoftExtrapolateMs = 95;
+const remoteMaxVisualSpeedMps = vehicleTuning.maxForwardKmh / 3.6 * vehicleTuning.itSpeedMultiplier + 18;
 const networkPingIntervalMs = 1000;
 const pingDisplaySampleLimit = 9;
 const rttSampleWindowMs = 30000;
 const maxValidRttMs = 5000;
 const visualCorrectionDecayRate = 14;
-const localSmallCorrectionDecayRate = 48;
-const localMediumCorrectionDecayRate = 30;
+const localSmallCorrectionDecayRate = 28;
+const localMediumCorrectionDecayRate = 18;
+const presentationDtMax = 1 / 45;
+const cameraSmoothingDtMax = 1 / 60;
+const aiVisualCorrectionRate = 32;
+const aiVisualRotationRate = 30;
+const simulatedVisualSnapDistanceSq = 16;
+const wheelVisualSpeedSmoothingRate = 18;
+const wheelVisualSteerSmoothingRate = 24;
 const visualCorrectionSnapDistanceSq = 900;
 const visualCorrectionMinDistanceSq = 0.0004;
-const localVisualCorrectionMinDistanceSq = 0.09;
+const localVisualCorrectionMinDistanceSq = 0.01;
 const maxPlayerNameLength = 14;
 const collisionGroups = {
   arena: 1,
@@ -2908,9 +2921,12 @@ function createCar({ id, name, color, isPlayer = false }) {
     wheelVisuals,
     visualWheelSpin: [0, 0, 0, 0],
     visualWheelSteer: [0, 0, 0, 0],
+    visualForwardSpeed: 0,
     visualCorrectionPosition: new THREE.Vector3(),
     visualCorrectionQuaternion: new THREE.Quaternion(),
     visualCorrectionActive: false,
+    renderVisualReady: false,
+    renderVisualVelocity: new THREE.Vector3(),
     input: makeInputState(),
     activeInWorld: true,
     currentSteering: 0,
@@ -3009,6 +3025,7 @@ function deactivateCar(car) {
   car.manualRightingElapsed = 0;
   car.isIt = false;
   car.immunityRemaining = 0;
+  car.renderVisualReady = false;
   hideWheelVisuals(car.wheelVisuals);
 }
 
@@ -3041,6 +3058,10 @@ function syncChassisHistory(car) {
   car.body.interpolatedPosition.copy(car.body.position);
   car.body.previousQuaternion.copy(car.body.quaternion);
   car.body.interpolatedQuaternion.copy(car.body.quaternion);
+  car.visual.position.set(car.body.position.x, car.body.position.y, car.body.position.z);
+  car.visual.quaternion.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+  car.renderVisualVelocity?.set(car.body.velocity.x, car.body.velocity.y, car.body.velocity.z);
+  car.renderVisualReady = true;
 }
 
 function transferItTo(car) {
@@ -3308,6 +3329,7 @@ function preserveCarVisualContinuity(car, beforePosition, beforeQuaternion, { sn
 
 function applyCarVisualCorrection(car, dt) {
   if (!car.visualCorrectionActive) return;
+  const smoothingDt = Math.min(dt, presentationDtMax);
   car.visual.position.add(car.visualCorrectionPosition);
   car.visual.quaternion.premultiply(car.visualCorrectionQuaternion).normalize();
 
@@ -3319,7 +3341,7 @@ function applyCarVisualCorrection(car, dt) {
         ? localMediumCorrectionDecayRate
         : visualCorrectionDecayRate
     : visualCorrectionDecayRate;
-  const decay = THREE.MathUtils.clamp(1 - Math.exp(-dt * decayRate), 0, 1);
+  const decay = THREE.MathUtils.clamp(1 - Math.exp(-smoothingDt * decayRate), 0, 1);
   car.visualCorrectionPosition.multiplyScalar(1 - decay);
   car.visualCorrectionQuaternion.slerp(visualCorrectionIdentityQuat, decay);
   if (
@@ -3346,6 +3368,7 @@ function spawnCarAt(car, spawn) {
   car.surfaceContactCount = 0;
   car.manualRightingActive = false;
   car.manualRightingElapsed = 0;
+  car.visualForwardSpeed = 0;
   if (car.visualWheelSpin) car.visualWheelSpin.fill(0);
   if (car.visualWheelSteer) car.visualWheelSteer.fill(0);
   car.ai.stuckTimer = 0;
@@ -3706,6 +3729,25 @@ function recordNetworkPong(message) {
   multiplayerState.lastPongAt = now;
 }
 
+function recordSnapshotClockOffset(snapshot, receivedAt) {
+  if (!Number.isFinite(snapshot?.serverTime)) return;
+  const rttStats = networkRttWindowStats(receivedAt);
+  const oneWayMs = Number.isFinite(rttStats.min)
+    ? rttStats.min * 0.5
+    : Number.isFinite(multiplayerState.pingMs)
+      ? multiplayerState.pingMs * 0.5
+      : 0;
+  const measuredOffset = snapshot.serverTime - (receivedAt - oneWayMs);
+  if (!Number.isFinite(measuredOffset)) return;
+  if (!Number.isFinite(multiplayerState.serverClockOffsetMs)) {
+    multiplayerState.serverClockOffsetMs = measuredOffset;
+    return;
+  }
+  const error = measuredOffset - multiplayerState.serverClockOffsetMs;
+  const blend = Math.abs(error) > 80 ? 0.08 : 0.025;
+  multiplayerState.serverClockOffsetMs += error * blend;
+}
+
 function averageSnapshotMs() {
   const intervals = multiplayerState.snapshotIntervals;
   if (!intervals.length) return null;
@@ -4047,6 +4089,7 @@ function sendLocalInput(force = false) {
 function makePredictedRound(round) {
   const predictedRound = {
     id: round.id,
+    seed: round.seed,
     startedAt: round.startedAt,
     playStartsAt: round.playStartsAt,
     endsAt: round.endsAt,
@@ -4062,6 +4105,7 @@ function makeLocalSharedRound({ roundTime, arena, slots }) {
   const playStartsAt = now + gameState.countdownDuration * 1000;
   const sharedRound = {
     id: `local-${now}`,
+    seed: `local-${now}`,
     startedAt: now,
     playStartsAt,
     endsAt: playStartsAt + roundTime * 1000,
@@ -4452,13 +4496,90 @@ function applyNetworkBoostSample(car, boostTimeRemaining = 0, boostCooldownRemai
   if (car.boostTimeRemaining > 0) car.boostVisualUntil = Math.max(car.boostVisualUntil ?? 0, performance.now() + 220);
 }
 
+function unpackCompactInput(value) {
+  if (!Array.isArray(value)) return cloneInputSnapshot(value);
+  const flags = Math.max(0, Math.floor(Number(value[2]) || 0));
+  return {
+    throttle: THREE.MathUtils.clamp((Number(value[0]) || 0) / 1000, -1, 1),
+    steer: THREE.MathUtils.clamp((Number(value[1]) || 0) / 1000, -1, 1),
+    boost: Boolean(flags & 1),
+    boostQueued: Boolean(flags & 2),
+    jumpQueued: Boolean(flags & 4),
+    airRoll: THREE.MathUtils.clamp((Number(value[3]) || 0) / 1000, -1, 1),
+  };
+}
+
+function decodeQuantizedVec3(value, scale) {
+  return [
+    (Number(value?.[0]) || 0) / scale,
+    (Number(value?.[1]) || 0) / scale,
+    (Number(value?.[2]) || 0) / scale,
+  ];
+}
+
+function decodeQuantizedQuat(value) {
+  const quat = [
+    (Number(value?.[0]) || 0) / 32767,
+    (Number(value?.[1]) || 0) / 32767,
+    (Number(value?.[2]) || 0) / 32767,
+    (Number(value?.[3]) || 32767) / 32767,
+  ];
+  const length = Math.hypot(quat[0], quat[1], quat[2], quat[3]);
+  if (length > 0.0001) {
+    quat[0] /= length;
+    quat[1] /= length;
+    quat[2] /= length;
+    quat[3] /= length;
+  }
+  return quat;
+}
+
+function decodeSecondsMs(value) {
+  return Math.max(0, (Number(value) || 0) / 1000);
+}
+
+function decodeCompactCarSnapshot(entry) {
+  const flags = Math.max(0, Math.floor(Number(entry[6]) || 0));
+  return {
+    key: entry[0],
+    position: decodeQuantizedVec3(entry[1], 100),
+    quaternion: decodeQuantizedQuat(entry[2]),
+    velocity: decodeQuantizedVec3(entry[3], 100),
+    angularVelocity: decodeQuantizedVec3(entry[4], 1000),
+    score: decodeSecondsMs(entry[5]),
+    isIt: Boolean(flags & 1),
+    immunityRemaining: decodeSecondsMs(entry[7]),
+    boostTimeRemaining: decodeSecondsMs(entry[8]),
+    boostCooldownRemaining: decodeSecondsMs(entry[9]),
+    input: unpackCompactInput(entry[10]),
+    inputSequence: entry[11] ?? 0,
+    sessionId: entry[12] ?? null,
+    inputTick: entry[13] ?? 0,
+    manualRightingActive: Boolean(flags & 2),
+    manualRightingElapsed: decodeSecondsMs(entry[14]),
+    manualRightingStartPosition: entry[15] ? decodeQuantizedVec3(entry[15], 100) : undefined,
+    manualRightingTargetPosition: entry[16] ? decodeQuantizedVec3(entry[16], 100) : undefined,
+    manualRightingStartQuaternion: entry[17] ? decodeQuantizedQuat(entry[17]) : undefined,
+    manualRightingTargetQuaternion: entry[18] ? decodeQuantizedQuat(entry[18]) : undefined,
+  };
+}
+
 function setNetworkCarTarget(car, snapshot, serverTime, receivedAt = performance.now()) {
   const firstTarget = !car.networkSnapshots?.length;
   const sample = cloneNetworkSnapshot(snapshot, serverTime, receivedAt);
+  const previous = car.networkSnapshots?.[car.networkSnapshots.length - 1] ?? null;
+  if (previous && sample.serverTime <= previous.serverTime) return;
+  if (previous) {
+    const dx = sample.position[0] - previous.position[0];
+    const dy = sample.position[1] - previous.position[1];
+    const dz = sample.position[2] - previous.position[2];
+    if (dx * dx + dy * dy + dz * dz < remoteMicroSnapDistanceSq) {
+      sample.velocity = [...previous.velocity];
+    }
+  }
   car.networkTarget = sample;
   car.networkSnapshots ??= [];
   car.networkSnapshots.push(sample);
-  car.networkSnapshots.sort((a, b) => a.serverTime - b.serverTime);
   while (car.networkSnapshots.length > remoteSnapshotBufferLimit) car.networkSnapshots.shift();
 
   const dx = snapshot.position[0] - car.body.position.x;
@@ -4471,9 +4592,12 @@ function currentRemoteInterpolationDelay() {
   const jitter = Number.isFinite(multiplayerState.jitterMs) ? multiplayerState.jitterMs : 0;
   const ping = Number.isFinite(multiplayerState.pingMs) ? multiplayerState.pingMs : 100;
   const avgSnapshot = averageSnapshotMs();
-  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 0.45 : remoteInterpolationBaseDelayMs;
+  const cadenceDelay = Number.isFinite(avgSnapshot) ? avgSnapshot * 1.35 : remoteInterpolationBaseDelayMs;
+  const spikeBudget = Number.isFinite(multiplayerState.latestRttMs) && Number.isFinite(multiplayerState.pingMs)
+    ? Math.max(0, multiplayerState.latestRttMs - multiplayerState.pingMs) * 0.35
+    : 0;
   return THREE.MathUtils.clamp(
-    Math.max(remoteInterpolationBaseDelayMs, ping * 0.1 + cadenceDelay + jitter * 0.4),
+    Math.max(remoteInterpolationBaseDelayMs, ping * 0.12 + cadenceDelay + jitter * 1.8 + spikeBudget),
     remoteInterpolationMinDelayMs,
     remoteInterpolationMaxDelayMs,
   );
@@ -4488,10 +4612,27 @@ function writeInterpolatedNetworkState(car, first, second, alpha) {
   const h10 = t3 - 2 * t2 + t;
   const h01 = -2 * t3 + 3 * t2;
   const h11 = t3 - t2;
+  const hermiteX =
+    h00 * first.position[0] + h10 * first.velocity[0] * durationSec + h01 * second.position[0] + h11 * second.velocity[0] * durationSec;
+  const hermiteY =
+    h00 * first.position[1] + h10 * first.velocity[1] * durationSec + h01 * second.position[1] + h11 * second.velocity[1] * durationSec;
+  const hermiteZ =
+    h00 * first.position[2] + h10 * first.velocity[2] * durationSec + h01 * second.position[2] + h11 * second.velocity[2] * durationSec;
+  const linearX = THREE.MathUtils.lerp(first.position[0], second.position[0], t);
+  const linearY = THREE.MathUtils.lerp(first.position[1], second.position[1], t);
+  const linearZ = THREE.MathUtils.lerp(first.position[2], second.position[2], t);
+  const segmentDistance = Math.hypot(
+    second.position[0] - first.position[0],
+    second.position[1] - first.position[1],
+    second.position[2] - first.position[2],
+  );
+  const overshoot = Math.hypot(hermiteX - linearX, hermiteY - linearY, hermiteZ - linearZ);
+  const maxOvershoot = Math.min(remoteMaxHermiteOvershootMeters, segmentDistance * 0.35 + 0.45);
+  const blendToLinear = overshoot > maxOvershoot ? maxOvershoot / Math.max(0.0001, overshoot) : 1;
   car.body.position.set(
-    h00 * first.position[0] + h10 * first.velocity[0] * durationSec + h01 * second.position[0] + h11 * second.velocity[0] * durationSec,
-    h00 * first.position[1] + h10 * first.velocity[1] * durationSec + h01 * second.position[1] + h11 * second.velocity[1] * durationSec,
-    h00 * first.position[2] + h10 * first.velocity[2] * durationSec + h01 * second.position[2] + h11 * second.velocity[2] * durationSec,
+    THREE.MathUtils.lerp(linearX, hermiteX, blendToLinear),
+    THREE.MathUtils.lerp(linearY, hermiteY, blendToLinear),
+    THREE.MathUtils.lerp(linearZ, hermiteZ, blendToLinear),
   );
   car.body.velocity.set(
     THREE.MathUtils.lerp(first.velocity[0], second.velocity[0], t),
@@ -4520,8 +4661,98 @@ function writeInterpolatedNetworkState(car, first, second, alpha) {
   applyNetworkBoostSample(car, boostTimeRemaining, boostCooldownRemaining);
 }
 
+function writeNetworkVisualInterpolatedState(car, first, second, alpha) {
+  const durationSec = THREE.MathUtils.clamp((second.serverTime - first.serverTime) / 1000, 0.001, 0.25);
+  const t = THREE.MathUtils.clamp(alpha, 0, 1);
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const h00 = 2 * t3 - 3 * t2 + 1;
+  const h10 = t3 - 2 * t2 + t;
+  const h01 = -2 * t3 + 3 * t2;
+  const h11 = t3 - t2;
+  const hermiteX =
+    h00 * first.position[0] + h10 * first.velocity[0] * durationSec + h01 * second.position[0] + h11 * second.velocity[0] * durationSec;
+  const hermiteY =
+    h00 * first.position[1] + h10 * first.velocity[1] * durationSec + h01 * second.position[1] + h11 * second.velocity[1] * durationSec;
+  const hermiteZ =
+    h00 * first.position[2] + h10 * first.velocity[2] * durationSec + h01 * second.position[2] + h11 * second.velocity[2] * durationSec;
+  const linearX = THREE.MathUtils.lerp(first.position[0], second.position[0], t);
+  const linearY = THREE.MathUtils.lerp(first.position[1], second.position[1], t);
+  const linearZ = THREE.MathUtils.lerp(first.position[2], second.position[2], t);
+  const segmentDistance = Math.hypot(
+    second.position[0] - first.position[0],
+    second.position[1] - first.position[1],
+    second.position[2] - first.position[2],
+  );
+  const overshoot = Math.hypot(hermiteX - linearX, hermiteY - linearY, hermiteZ - linearZ);
+  const maxOvershoot = Math.min(remoteMaxHermiteOvershootMeters, segmentDistance * 0.35 + 0.45);
+  const blendToLinear = overshoot > maxOvershoot ? maxOvershoot / Math.max(0.0001, overshoot) : 1;
+  car.visual.position.set(
+    THREE.MathUtils.lerp(linearX, hermiteX, blendToLinear),
+    THREE.MathUtils.lerp(linearY, hermiteY, blendToLinear),
+    THREE.MathUtils.lerp(linearZ, hermiteZ, blendToLinear),
+  );
+  networkCurrentQuat.set(first.quaternion[0], first.quaternion[1], first.quaternion[2], first.quaternion[3]).normalize();
+  networkTargetQuat.set(second.quaternion[0], second.quaternion[1], second.quaternion[2], second.quaternion[3]).normalize();
+  car.visual.quaternion.copy(networkCurrentQuat).slerp(networkTargetQuat, t);
+}
+
+function writeNetworkVisualExtrapolatedState(car, sample, elapsedMs) {
+  const speed = Math.min(
+    remoteMaxVisualSpeedMps,
+    Math.hypot(sample.velocity[0], sample.velocity[1], sample.velocity[2]),
+  );
+  const leadLimitedMs = speed > 0.1
+    ? Math.min(remoteInterpolationMaxExtrapolateMs, remoteMaxExtrapolatedLeadMeters / speed * 1000)
+    : remoteInterpolationMaxExtrapolateMs;
+  const clampedElapsedMs = Math.min(remoteInterpolationMaxExtrapolateMs, Math.max(0, elapsedMs));
+  const hardSeconds = Math.min(leadLimitedMs, clampedElapsedMs) / 1000;
+  const softExtraSeconds = speed > 0.1 && clampedElapsedMs > leadLimitedMs
+    ? (remoteSoftExtrapolatedLeadMeters / speed) *
+      (1 - Math.exp(-(clampedElapsedMs - leadLimitedMs) / remoteSoftExtrapolateMs))
+    : 0;
+  const seconds = hardSeconds + softExtraSeconds;
+  car.visual.position.set(
+    sample.position[0] + sample.velocity[0] * seconds,
+    sample.position[1] + sample.velocity[1] * seconds,
+    sample.position[2] + sample.velocity[2] * seconds,
+  );
+  car.visual.quaternion.set(sample.quaternion[0], sample.quaternion[1], sample.quaternion[2], sample.quaternion[3]);
+}
+
+function writeNetworkVisualAtRenderTime(car) {
+  const buffer = car.networkSnapshots;
+  if (!buffer?.length || !Number.isFinite(multiplayerState.serverClockOffsetMs)) return false;
+  const renderServerTime = performance.now() + multiplayerState.serverClockOffsetMs - currentRemoteInterpolationDelay();
+  let firstIndex = 0;
+  while (firstIndex + 1 < buffer.length && buffer[firstIndex + 1].serverTime <= renderServerTime) firstIndex += 1;
+  const first = buffer[firstIndex];
+  const second = buffer[firstIndex + 1] ?? null;
+  if (second && first.serverTime <= renderServerTime) {
+    const duration = Math.max(1, second.serverTime - first.serverTime);
+    writeNetworkVisualInterpolatedState(car, first, second, THREE.MathUtils.clamp((renderServerTime - first.serverTime) / duration, 0, 1));
+    return true;
+  }
+  const sample = second && renderServerTime < first.serverTime ? first : buffer[buffer.length - 1];
+  writeNetworkVisualExtrapolatedState(car, sample, renderServerTime - sample.serverTime);
+  return true;
+}
+
 function writeExtrapolatedNetworkState(car, sample, elapsedMs) {
-  const seconds = Math.min(remoteInterpolationMaxExtrapolateMs, Math.max(0, elapsedMs)) / 1000;
+  const speed = Math.min(
+    remoteMaxVisualSpeedMps,
+    Math.hypot(sample.velocity[0], sample.velocity[1], sample.velocity[2]),
+  );
+  const leadLimitedMs = speed > 0.1
+    ? Math.min(remoteInterpolationMaxExtrapolateMs, remoteMaxExtrapolatedLeadMeters / speed * 1000)
+    : remoteInterpolationMaxExtrapolateMs;
+  const clampedElapsedMs = Math.min(remoteInterpolationMaxExtrapolateMs, Math.max(0, elapsedMs));
+  const hardSeconds = Math.min(leadLimitedMs, clampedElapsedMs) / 1000;
+  const softExtraSeconds = speed > 0.1 && clampedElapsedMs > leadLimitedMs
+    ? (remoteSoftExtrapolatedLeadMeters / speed) *
+      (1 - Math.exp(-(clampedElapsedMs - leadLimitedMs) / remoteSoftExtrapolateMs))
+    : 0;
+  const seconds = hardSeconds + softExtraSeconds;
   car.body.position.set(
     sample.position[0] + sample.velocity[0] * seconds,
     sample.position[1] + sample.velocity[1] * seconds,
@@ -4591,10 +4822,9 @@ function updateNetworkControlledCars(dt) {
 
 function applyServerSnapshot(snapshot) {
   if (!snapshot || snapshot.roundId !== multiplayerState.activeRoundId) return;
+  if (snapshot.compact !== 2) return;
   const receivedAt = performance.now();
-  if (Number.isFinite(snapshot.serverTime) && !Number.isFinite(multiplayerState.serverClockOffsetMs)) {
-    multiplayerState.serverClockOffsetMs = snapshot.serverTime - receivedAt;
-  }
+  recordSnapshotClockOffset(snapshot, receivedAt);
   if (multiplayerState.lastSnapshotAt) {
     multiplayerState.snapshotIntervals.push(receivedAt - multiplayerState.lastSnapshotAt);
     if (multiplayerState.snapshotIntervals.length > 30) multiplayerState.snapshotIntervals.shift();
@@ -4604,31 +4834,9 @@ function applyServerSnapshot(snapshot) {
   let itCar = null;
   let sawLocalSnapshot = false;
   for (const car of gameState.cars) car.isIt = false;
-  const carSnapshots = snapshot.compact
-    ? snapshot.cars.map((entry) => ({
-      key: entry[0],
-      position: entry[1],
-      quaternion: entry[2],
-      velocity: entry[3],
-      angularVelocity: entry[4],
-      score: entry[5],
-      isIt: Boolean(entry[6]),
-      immunityRemaining: entry[7],
-      boostTimeRemaining: entry[8],
-      boostCooldownRemaining: entry[9],
-      input: entry[10],
-      inputSequence: entry[11] ?? 0,
-      sessionId: entry[12] ?? null,
-      inputTick: entry[13] ?? 0,
-      manualRightingActive: Boolean(entry[14]),
-      manualRightingElapsed: entry[15] ?? 0,
-      manualRightingStartPosition: entry[16],
-      manualRightingTargetPosition: entry[17],
-      manualRightingStartQuaternion: entry[18],
-      manualRightingTargetQuaternion: entry[19],
-    }))
-    : snapshot.cars;
-  if (snapshot.compact) snapshot.cars = carSnapshots;
+  const carSnapshots = snapshot.cars.map((entry) => decodeCompactCarSnapshot(entry));
+  snapshot.cars = carSnapshots;
+  const motionSampleTime = snapshot.sampleTime ?? snapshot.serverTime ?? Date.now();
   for (const carSnapshot of carSnapshots) {
     const car = gameState.networkCarByKey.get(carSnapshot.key);
     if (!car) continue;
@@ -4650,7 +4858,7 @@ function applyServerSnapshot(snapshot) {
       );
       sawLocalSnapshot = true;
     } else {
-      setNetworkCarTarget(car, carSnapshot, snapshot.serverTime ?? Date.now(), receivedAt);
+      setNetworkCarTarget(car, carSnapshot, motionSampleTime, receivedAt);
     }
   }
   if (sawLocalSnapshot) {
@@ -6072,16 +6280,45 @@ function keepCameraInsideArena(point, clearance = 1.15) {
   return point;
 }
 
+function smoothSimulatedCarVisual(car, targetPosition, targetQuaternion, dt) {
+  if (car === playerCar) {
+    car.visual.position.copy(targetPosition);
+    car.visual.quaternion.copy(targetQuaternion);
+    car.renderVisualReady = true;
+    return;
+  }
+  if (!car.renderVisualReady || car.visual.position.distanceToSquared(targetPosition) > simulatedVisualSnapDistanceSq) {
+    car.visual.position.copy(targetPosition);
+    car.visual.quaternion.copy(targetQuaternion);
+    car.renderVisualVelocity.set(car.body.velocity.x, car.body.velocity.y, car.body.velocity.z);
+    car.renderVisualReady = true;
+    return;
+  }
+
+  const smoothingDt = Math.min(dt, presentationDtMax);
+  const positionAlpha = THREE.MathUtils.clamp(1 - Math.exp(-smoothingDt * aiVisualCorrectionRate), 0, 1);
+  const rotationAlpha = THREE.MathUtils.clamp(1 - Math.exp(-smoothingDt * aiVisualRotationRate), 0, 1);
+  car.visual.position.lerp(targetPosition, positionAlpha);
+  car.visual.quaternion.slerp(targetQuaternion, rotationAlpha);
+}
+
 function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
-  car.visual.position.set(
-    THREE.MathUtils.lerp(car.body.previousPosition.x, car.body.position.x, interpolationAlpha),
-    THREE.MathUtils.lerp(car.body.previousPosition.y, car.body.position.y, interpolationAlpha),
-    THREE.MathUtils.lerp(car.body.previousPosition.z, car.body.position.z, interpolationAlpha),
-  );
-  tmpQuat
-    .set(car.body.previousQuaternion.x, car.body.previousQuaternion.y, car.body.previousQuaternion.z, car.body.previousQuaternion.w)
-    .slerp(tmpQuatB.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w), interpolationAlpha);
-  car.visual.quaternion.copy(tmpQuat);
+  if (car.isNetworkControlled) {
+    if (!writeNetworkVisualAtRenderTime(car)) {
+      car.visual.position.set(car.body.position.x, car.body.position.y, car.body.position.z);
+      car.visual.quaternion.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
+    }
+  } else {
+    tmpVec3B.set(
+      THREE.MathUtils.lerp(car.body.previousPosition.x, car.body.position.x, interpolationAlpha),
+      THREE.MathUtils.lerp(car.body.previousPosition.y, car.body.position.y, interpolationAlpha),
+      THREE.MathUtils.lerp(car.body.previousPosition.z, car.body.position.z, interpolationAlpha),
+    );
+    tmpQuat
+      .set(car.body.previousQuaternion.x, car.body.previousQuaternion.y, car.body.previousQuaternion.z, car.body.previousQuaternion.w)
+      .slerp(tmpQuatB.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w), interpolationAlpha);
+    smoothSimulatedCarVisual(car, tmpVec3B, tmpQuat, dt);
+  }
   applyCarVisualCorrection(car, dt);
   recordLocalJitterSample(car, dt);
   carBodyVisualMatrix.compose(car.visual.position, car.visual.quaternion, car.visual.scale);
@@ -6094,27 +6331,31 @@ function syncCarVisual(car, interpolationAlpha, visualTime, dt) {
 
   const wheelBaseIndex = car.wheelVisuals.slot * wheelsPerCar;
   const useSharedWheelVisuals = isSharedCannonRoundActive();
+  const wheelDt = Math.min(dt, presentationDtMax);
+  const wheelSpeedAlpha = THREE.MathUtils.clamp(1 - Math.exp(-wheelDt * wheelVisualSpeedSmoothingRate), 0, 1);
+  const wheelSteerAlpha = THREE.MathUtils.clamp(1 - Math.exp(-wheelDt * wheelVisualSteerSmoothingRate), 0, 1);
   for (let i = 0; i < car.vehicle.wheelInfos.length; i += 1) {
     if (useSharedWheelVisuals) {
       const point = wheelPositions[i];
       const forward = tmpVec3D.set(0, 0, 1).applyQuaternion(car.visual.quaternion).normalize();
-      const forwardSpeed =
+      const rawForwardSpeed =
         car.body.velocity.x * forward.x +
         car.body.velocity.y * forward.y +
         car.body.velocity.z * forward.z;
-      car.visualWheelSpin[i] += (forwardSpeed * dt) / Math.max(0.001, wheelOptions.radius);
+      car.visualForwardSpeed = THREE.MathUtils.lerp(car.visualForwardSpeed ?? rawForwardSpeed, rawForwardSpeed, wheelSpeedAlpha);
+      car.visualWheelSpin[i] += (car.visualForwardSpeed * wheelDt) / Math.max(0.001, wheelOptions.radius);
       const steerInput = car === playerCar
         ? playerCar.input.steer
         : (car.input?.steer ?? 0);
       const steerAngle = i < 2
         ? THREE.MathUtils.clamp(steerInput * vehicleTuning.steerAngle, -vehicleTuning.steerAngle, vehicleTuning.steerAngle)
         : 0;
-      car.visualWheelSteer[i] = steerAngle;
+      car.visualWheelSteer[i] = THREE.MathUtils.lerp(car.visualWheelSteer[i] ?? steerAngle, steerAngle, wheelSteerAlpha);
       wheelVisualPosition
         .set(point.x, point.y - 0.28, point.z)
         .applyQuaternion(car.visual.quaternion)
         .add(car.visual.position);
-      wheelSteerQuaternion.setFromAxisAngle(upAxis, steerAngle);
+      wheelSteerQuaternion.setFromAxisAngle(upAxis, car.visualWheelSteer[i]);
       wheelSpinQuaternion.setFromAxisAngle(tmpVec3A.set(1, 0, 0), car.visualWheelSpin[i]);
       wheelVisualQuaternion
         .copy(car.visual.quaternion)
@@ -6253,6 +6494,7 @@ function updateHud(chaseState = chasePressureState()) {
 
 function syncVisuals(dt, interpolationAlpha) {
   const visualTime = performance.now();
+  const cameraDt = Math.min(dt, cameraSmoothingDtMax);
   updateTagBursts(dt);
   for (const car of gameState.cars) syncCarVisual(car, interpolationAlpha, visualTime, dt);
   if (globalWheelVisuals) {
@@ -6277,7 +6519,7 @@ function syncVisuals(dt, interpolationAlpha) {
   const speed = velocityForward.length();
   if (speed > 5) rawForward.lerp(velocityForward.multiplyScalar(1 / speed), 0.42).normalize();
 
-  cameraState.followForward.lerp(rawForward, 1 - Math.exp(-dt * 4.2)).normalize();
+  cameraState.followForward.lerp(rawForward, 1 - Math.exp(-cameraDt * 4.2)).normalize();
   const carForward = cameraState.followForward;
   const carRight = cameraRawRight.crossVectors(upAxis, carForward).normalize();
   const speedT = THREE.MathUtils.clamp(speed / 40, 0, 1);
@@ -6320,18 +6562,16 @@ function syncVisuals(dt, interpolationAlpha) {
     }
   }
 
-  cameraState.position.lerp(desiredPosition, 1 - Math.exp(-dt * 5.0));
-  cameraState.target.lerp(desiredTarget, 1 - Math.exp(-dt * 6.6));
-  clampCameraLineOfSight(cameraObstructionOrigin, cameraState.position, 1.35);
-  keepCameraInsideArena(cameraState.position, 1.25);
   const minCameraDistance = cameraObstructed ? 6.8 : 9.5;
-  if (cameraState.position.distanceTo(cameraState.target) < minCameraDistance) {
-    cameraSafeOffset.copy(cameraState.position).sub(cameraState.target);
+  if (desiredPosition.distanceTo(desiredTarget) < minCameraDistance) {
+    cameraSafeOffset.copy(desiredPosition).sub(desiredTarget);
     if (cameraSafeOffset.lengthSq() < 0.001) cameraSafeOffset.copy(carForward).multiplyScalar(-1).addScaledVector(upAxis, 0.35);
-    cameraState.position.copy(cameraState.target).addScaledVector(cameraSafeOffset.normalize(), minCameraDistance);
-    clampCameraLineOfSight(cameraObstructionOrigin, cameraState.position, 1.35);
-    keepCameraInsideArena(cameraState.position, 1.25);
+    desiredPosition.copy(desiredTarget).addScaledVector(cameraSafeOffset.normalize(), minCameraDistance);
+    keepCameraInsideArena(desiredPosition, 1.25);
   }
+
+  cameraState.position.lerp(desiredPosition, 1 - Math.exp(-cameraDt * 5.0));
+  cameraState.target.lerp(desiredTarget, 1 - Math.exp(-cameraDt * 6.6));
   camera.position.copy(cameraState.position);
   camera.lookAt(cameraState.target);
 
@@ -6646,6 +6886,7 @@ window.__arenaCarDebug = {
       it: gameState.itCar?.id ?? null,
       scores: gameState.cars.map((car) => ({
         id: car.id,
+        name: car.name,
         color: car.color.name,
         score: car.score,
         it: car.isIt,
@@ -6653,11 +6894,15 @@ window.__arenaCarDebug = {
       })),
       cars: gameState.cars.map((car) => ({
         id: car.id,
+        name: car.name,
         position: [car.body.position.x, car.body.position.y, car.body.position.z],
         velocity: [car.body.velocity.x, car.body.velocity.y, car.body.velocity.z],
         wheelsOnGround: car.vehicle.numWheelsOnGround,
         surfaceContactGrace: car.surfaceContactGrace,
         manualRighting: car.manualRightingActive,
+        networkControlled: Boolean(car.isNetworkControlled),
+        networkKey: car.networkKey ?? null,
+        networkBufferSize: car.networkSnapshots?.length ?? 0,
         input: {
           throttle: car.input.throttle,
           steer: car.input.steer,
@@ -6666,6 +6911,15 @@ window.__arenaCarDebug = {
         },
         visualWheelSpin: car.visualWheelSpin?.map((value) => Number(value.toFixed(4))) ?? [],
         visualWheelSteer: car.visualWheelSteer?.map((value) => Number(value.toFixed(4))) ?? [],
+        visual: {
+          position: [car.visual.position.x, car.visual.position.y, car.visual.position.z],
+          quaternion: [car.visual.quaternion.x, car.visual.quaternion.y, car.visual.quaternion.z, car.visual.quaternion.w],
+          bodyDelta: [
+            car.visual.position.x - car.body.position.x,
+            car.visual.position.y - car.body.position.y,
+            car.visual.position.z - car.body.position.z,
+          ],
+        },
         ai: car.isPlayer ? null : {
           personality: car.ai.personalityKey,
           mode: car.ai.mode,
@@ -6754,6 +7008,75 @@ window.__arenaCarDebug = {
     if (!car) return false;
     setCarDebugState(car, { position, velocity, quaternion });
     return true;
+  },
+  injectServerSnapshot(snapshot) {
+    applyServerSnapshot(snapshot);
+    return true;
+  },
+  resetRemoteInterpolationDebug() {
+    multiplayerState.lastSnapshotAt = 0;
+    multiplayerState.snapshotIntervals = [];
+    multiplayerState.serverClockOffsetMs = null;
+    multiplayerState.remoteInterpolationStats.extrapolations = 0;
+    multiplayerState.remoteInterpolationStats.bufferUnderruns = 0;
+    multiplayerState.remoteInterpolationStats.bufferSamples = 0;
+    multiplayerState.remoteInterpolationStats.bufferSampleCount = 0;
+    multiplayerState.remoteInterpolationStats.maxBufferSize = 0;
+    multiplayerState.remoteInterpolationStats.lastUiExtrapolations = 0;
+    multiplayerState.remoteInterpolationStats.lastUiSampleAt = 0;
+    multiplayerState.remoteInterpolationStats.extrapolationsPerSecond = 0;
+    for (const car of gameState.networkCars) {
+      car.networkTarget = null;
+      car.networkSnapshots = [];
+    }
+  },
+  startSyntheticNetworkRound(options = {}) {
+    const now = Date.now();
+    const roundId = options.roundId ?? `debug-${now}`;
+    const roundTime = Number(options.roundTime ?? 60);
+    const arena = options.arena ?? arenaSelect.value;
+    multiplayerState.mode = "multiplayer";
+    multiplayerState.connected = true;
+    multiplayerState.selfId = options.localClientId ?? "debug-local-client";
+    multiplayerState.sessionId = options.localSessionId ?? "debug-local-session";
+    multiplayerState.roomCode = options.roomCode ?? "DEBUG";
+    multiplayerState.activeRoundId = null;
+    startServerRound({
+      id: roundId,
+      seed: `${roundId}-seed`,
+      startedAt: now - 1000,
+      playStartsAt: now - 500,
+      endsAt: now + roundTime * 1000,
+      settings: {
+        roundTime,
+        carCount: 2,
+        arena,
+      },
+      slots: [
+        {
+          key: `player:${multiplayerState.sessionId}`,
+          type: "player",
+          clientId: multiplayerState.selfId,
+          sessionId: multiplayerState.sessionId,
+          name: "LocalObserver",
+          color: "red",
+        },
+        {
+          key: "player:debug-remote-session",
+          type: "player",
+          clientId: "debug-remote-client",
+          sessionId: "debug-remote-session",
+          name: "RemoteDriver",
+          color: "teal",
+        },
+      ],
+    });
+    multiplayerState.predictedRound = null;
+    this.resetRemoteInterpolationDebug();
+    return {
+      roundId,
+      remoteKey: "player:debug-remote-session",
+    };
   },
   forceIt(id) {
     const car = gameState.cars.find((entry) => entry.id === id);

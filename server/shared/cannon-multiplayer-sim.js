@@ -1283,6 +1283,7 @@ export function tickSim(round, now) {
 
 export function makeSnapshot(roomCode, round, now = Date.now()) {
   if (!round?.sim) return null;
+  const sampleTime = Math.round(round.sim.lastTick - round.sim.accumulator * 1000);
   const remainingMs = now < round.playStartsAt
     ? round.settings.roundTime * 1000
     : Math.max(0, round.endsAt - now);
@@ -1291,6 +1292,7 @@ export function makeSnapshot(roomCode, round, now = Date.now()) {
     roomCode,
     roundId: round.id,
     serverTime: now,
+    sampleTime,
     simTick: round.sim.tick,
     simLastTick: round.sim.lastTick,
     simAccumulator: round.sim.accumulator,

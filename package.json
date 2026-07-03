@@ -20,7 +20,10 @@
     "check:multiplayer": "node scripts/check-multiplayer-local.mjs",
     "check:stress": "node scripts/check-multiplayer-stress-local.mjs",
     "check:wan": "node scripts/check-multiplayer-wan-local.mjs",
-    "check:jitter": "node scripts/check-client-jitter.mjs"
+    "check:jitter": "node scripts/check-client-jitter.mjs",
+    "check:solo-jitter": "node scripts/check-solo-render-jitter.mjs",
+    "check:remote-jitter": "node scripts/check-remote-jitter.mjs",
+    "check:remote-interp": "node scripts/check-remote-interpolation.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",

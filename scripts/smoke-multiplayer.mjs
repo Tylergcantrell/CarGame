@@ -51,10 +51,10 @@ function makeClient() {
 }
 
 function snapshotCars(message) {
-  if (!message.compact) return message.cars ?? [];
+  if (message.compact !== 2) return [];
   return (message.cars ?? []).map((entry) => ({
     key: entry[0],
-    score: entry[5],
+    score: (entry[5] ?? 0) / 1000,
     isIt: Boolean(entry[6]),
     inputSequence: entry[11] ?? 0,
     sessionId: entry[12] ?? null,

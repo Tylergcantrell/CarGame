@@ -63,9 +63,9 @@ function makeClient({ roomCode, index }) {
       if (stats.lastSnapshotAt) stats.snapshotIntervals.push(now - stats.lastSnapshotAt);
       stats.lastSnapshotAt = now;
       stats.snapshots += 1;
-      const cars = message.compact
+      const cars = message.compact === 2
         ? message.cars.map((entry) => ({ sessionId: entry[12] ?? null, inputSequence: entry[11] ?? 0 }))
-        : message.cars;
+        : [];
       const car = cars.find((entry) => entry.sessionId === stats.sessionId);
       if (car) stats.lastAck = Math.max(stats.lastAck, car.inputSequence ?? 0);
     } else if (message.type === "error") {
